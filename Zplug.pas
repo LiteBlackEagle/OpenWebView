@@ -322,7 +322,7 @@ if (typeof window.ZTaskManager === 'undefined') {
 
         async loadState() {
             if (!window.ZSharedDB) return;
-            try {
+try {
                 const state = await window.ZSharedDB.performTransaction(STORE_NAME, 'readonly', store => store.get(HISTORY_KEY));
                 if (state && Array.isArray(state.history)) { this.promptHistory = state.history; }
             } catch(e) { console.error("ZTaskManager: Failed to load state.", e); }
