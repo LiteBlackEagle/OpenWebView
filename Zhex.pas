@@ -1435,7 +1435,7 @@ bgimg
                     const normalizedY = (clientY / innerHeight) - 0.5;
                     const offsetX = normalizedX * parallaxIntensity;
                     const offsetY = normalizedY * parallaxIntensity;
-                    body.style.backgroundPosition = \`calc(50% + \${offsetX}px) calc(50% + \${offsetY}px)\`;
+                    body.style.backgroundPosition = `calc(50% + ${offsetX}px) calc(50% + ${offsetY}px)`;
                 }
 
 
@@ -1831,7 +1831,7 @@ bgimg
                     const normalizedY = (clientY / innerHeight) - 0.5;
                     const offsetX = normalizedX * parallaxIntensity;
                     const offsetY = normalizedY * parallaxIntensity;
-                    body.style.backgroundPosition = \`calc(50% + \${offsetX}px) calc(50% + \${offsetY}px)\`;
+                    body.style.backgroundPosition = `calc(50% + ${offsetX}px) calc(50% + ${offsetY}px)`;
                 }
 
 
