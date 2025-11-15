@@ -5,129 +5,333 @@ interface
 uses
   zhex;
 
-const
-  zDB_script =
-  '''
-  if (typeof window.ZDBInitialized === 'undefined') {
-      window.ZDB_READY = false;
-      window.ZDBInitialized = true;
-      (function() {
-          const DB_NAME = 'ZWebview_Persistence_DB';
-          let DB_VERSION = 1;
+const zFaviconBar =
+'''
+if (typeof window.ZFaviconBarInitialized !== 'undefined') {
+    if (window.ZFaviconBarTeardown) window.ZFaviconBarTeardown();
+}
+window.ZFaviconBarInitialized = true;
 
-          const EXPECTED_STORES = [
-              'zKernelScripts',
-              'zKernelState',
-              'zKeyMapperState',
-              'zMediaPopupState',
-              'zMiniAlbumItems',
-              'zContextMenu2State'
-          ];
+(function() {
+    // --- STATE & CONFIGURATION ---
+    const STORE_NAME = 'zFaviconBarState';
+    const STATE_KEY = 'lastPosition';
+    const INACTIVITY_DURATION = 3000;
+    const BROWSER_UID = typeof window.Z_BROWSER_UID === 'number' ? window.Z_BROWSER_UID : 0;
+    let dockContainer, iconContainer, prevBtn, nextBtn, mainSlot;
+    let isDragging = false;
+    let capturedPointerId = null;
+    let dragStartOffset = { x: 0, y: 0 };
+    let currentFaviconUrl = null;
+    let headObserver = null;
+    let titleObserver = null;
+    let resizeDebounceTimer = null;
+    let inactivityTimer = null;
+    const DOCK_MAIN_SIZE = 28;
+    const NAV_BUTTON_SIZE = 24;
+    const MIN_SLOT = 0;
+    const MAX_SLOT = 12;
+    const DOCK_PADDING = 10;
+    const HORIZONTAL_CENTER_Y = 10;
 
-          let _dbPromise = null;
+    const DEFAULT_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`;
+    const PREV_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>`;
+    const NEXT_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
 
-          function getDBConnection(newVersion) {
-              return new Promise((resolve, reject) => {
-                  const request = indexedDB.open(DB_NAME, newVersion);
-                  request.onerror = event => reject(event.target.error);
-                  request.onsuccess = event => resolve(event.target.result);
-                  request.onupgradeneeded = event => {
-                      const db = event.target.result;
-                      const existingStores = Array.from(db.objectStoreNames);
-                      console.log('[zDB] onupgradeneeded triggered. Applying schema...');
+    // --- UTILITY & DB (Giữ nguyên) ---
+    let policy;
+    try { policy = window.trustedTypes.createPolicy('z-favicon-bar-policy-v8', { createHTML: string => string }); } catch (e) {}
+    const setSafeHTML = (element, html) => { if (element && policy) element.innerHTML = policy.createHTML(html); else if (element) element.innerHTML = html; };
+    const Persistence = {
+        async savePosition(position) {
+            if (!window.ZSharedDB) return;
+            try {
+                const dataToSave = { id: STATE_KEY, position: position };
+                await window.ZSharedDB.performTransaction(STORE_NAME, 'readwrite', store => store.put(dataToSave));
+            } catch (err) { console.error(`[ZFaviconBar] Failed to save position:`, err); }
+        },
+        async loadPosition() {
+            if (!window.ZSharedDB) return null;
+            try {
+                const savedState = await window.ZSharedDB.performTransaction(STORE_NAME, 'readonly', store => store.get(STATE_KEY));
+                return (savedState && savedState.position) ? savedState.position : null;
+            } catch (err) { console.error(`[ZFaviconBar] Failed to load position:`, err); return null; }
+        }
+    };
+    function requestSwitchTo(slotId) {
+        if (window.chrome && window.chrome.webview) {
+            const payload = { type: 'ZFaviconBarSwitch', data: { switchToId: parseInt(slotId, 10) } };
+            window.chrome.webview.postMessage(JSON.stringify(payload));
+        } else { console.log(`[ZFaviconBar] Request switch to UID: ${slotId}`); }
+    }
 
-                      const storesToAdd = EXPECTED_STORES.filter(s => !existingStores.includes(s));
-                      storesToAdd.forEach(storeName => {
-                          if (!db.objectStoreNames.contains(storeName)) {
-                              db.createObjectStore(storeName, { keyPath: 'id' });
-                              console.log(`[zDB]   -> Created object store: '${storeName}'`);
-                          }
-                      });
+    // --- UI CREATION (Giữ nguyên) ---
+    function createUI() {
+        const style = document.createElement('style');
+        style.id = 'z-favicon-bar-styles';
+        style.textContent = `
+            #z-favicon-dock { position: fixed; z-index: 2147483644; display: flex; align-items: center; gap: 6px; background-color: rgba(30, 30, 30, 0.85); backdrop-filter: blur(12px) saturate(1.5); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 30px; padding: 4px; box-shadow: 0 5px 20px rgba(0, 0, 0, 0.4); user-select: none; opacity: 1; transform: translateY(0); visibility: visible; transition: opacity 0.4s ease, transform 0.4s ease, visibility 0s 0s, box-shadow 0.3s ease; }
+            #z-favicon-dock.inactive { opacity: 0; transform: translateY(100%); visibility: hidden; pointer-events: none; transition: opacity 0.4s ease, transform 0.4s ease, visibility 0s 0.4s, box-shadow 0.3s ease; }
+            .z-favicon-slot { display: flex; align-items: center; justify-content: center; border-radius: 50%; background-color: rgba(255, 255, 255, 0.05); transition: all 0.2s ease; cursor: pointer; }
+            .z-favicon-slot:not(.disabled):hover { background-color: rgba(255, 255, 255, 0.15); transform: scale(1.1); }
+            .z-favicon-slot:not(.disabled):active { transform: scale(0.95); background-color: rgba(0, 191, 255, 0.2); }
+            .z-favicon-slot.disabled { opacity: 0.4; cursor: not-allowed; }
+            #z-favicon-main-slot { width: ${DOCK_MAIN_SIZE}px; height: ${DOCK_MAIN_SIZE}px; cursor: grab; border: 2px solid rgba(0, 191, 255, 0.5); touch-action: none; font-family: monospace; font-size: 18px; font-weight: bold; color: #e0e0e0; }
+            #z-favicon-main-slot:active { cursor: grabbing; }
+            .z-favicon-nav-btn { width: ${NAV_BUTTON_SIZE}px; height: ${NAV_BUTTON_SIZE}px; }
+            .z-favicon-icon-container { width: 60%; height: 60%; display: flex; align-items: center; justify-content: center; transition: transform 0.3s ease; pointer-events: none; }
+            .z-favicon-icon-container img, .z-favicon-icon-container svg { width: 100%; height: 100%; object-fit: contain; pointer-events: none; color: #a0a0a0; }
+        `;
+        document.head.appendChild(style);
+        dockContainer = document.createElement('div');
+        dockContainer.id = 'z-favicon-dock';
+        prevBtn = document.createElement('div');
+        prevBtn.id = 'z-favicon-prev-btn';
+        prevBtn.className = 'z-favicon-slot z-favicon-nav-btn';
+        prevBtn.title = 'Previous Browser';
+        setSafeHTML(prevBtn, `<div class="z-favicon-icon-container">${PREV_ICON_SVG}</div>`);
+        dockContainer.appendChild(prevBtn);
+        mainSlot = document.createElement('div');
+        mainSlot.id = 'z-favicon-main-slot';
+        mainSlot.className = 'z-favicon-slot';
+        mainSlot.title = 'Drag to move';
+        setSafeHTML(mainSlot, `<div class="z-favicon-icon-container">${DEFAULT_ICON_SVG}</div>`);
+        dockContainer.appendChild(mainSlot);
+        iconContainer = mainSlot.querySelector('.z-favicon-icon-container');
+        nextBtn = document.createElement('div');
+        nextBtn.id = 'z-favicon-next-btn';
+        nextBtn.className = 'z-favicon-slot z-favicon-nav-btn';
+        nextBtn.title = 'Next Browser';
+        setSafeHTML(nextBtn, `<div class="z-favicon-icon-container">${NEXT_ICON_SVG}</div>`);
+        dockContainer.appendChild(nextBtn);
+        document.body.appendChild(dockContainer);
+    }
 
-                      const storesToRemove = existingStores.filter(s => !EXPECTED_STORES.includes(s));
-                      storesToRemove.forEach(storeName => {
-                          if (db.objectStoreNames.contains(storeName)) {
-                              db.deleteObjectStore(storeName);
-                              console.log(`[zDB]   -> Removed obsolete object store: '${storeName}'`);
-                          }
-                      });
-                  };
-              });
-          }
+    // --- STATE & UI SYNC (Giữ nguyên) ---
+    function updateDisplay() {
+        if (!dockContainer) return;
+        if (BROWSER_UID === 0) findAndSetFavicon();
+        else setSafeHTML(iconContainer, `${BROWSER_UID}`);
+        prevBtn.classList.toggle('disabled', BROWSER_UID <= MIN_SLOT);
+        nextBtn.classList.toggle('disabled', BROWSER_UID >= MAX_SLOT);
+    }
 
-          async function initializeDB() {
-              console.log('[zDB] Initializing database...');
-              try {
-                  // Mở để kiểm tra phiên bản và các store hiện có
-                  const dbForCheck = await new Promise((resolve, reject) => {
-                      const request = indexedDB.open(DB_NAME);
-                      request.onerror = e => resolve(null); // Nếu lỗi, có thể DB chưa tồn tại
-                      request.onsuccess = e => resolve(e.target.result);
-                  });
+    // --- ACTIVITY SYNC (Giữ nguyên) ---
+    function dispatchUIActivityEvent() { window.dispatchEvent(new CustomEvent('Z_UI_ACTIVITY')); }
+    function enterInactiveMode() { if (dockContainer) dockContainer.classList.add('inactive'); }
+    function resetInactivityTimer() { clearTimeout(inactivityTimer); if (dockContainer) dockContainer.classList.remove('inactive'); inactivityTimer = setTimeout(enterInactiveMode, INACTIVITY_DURATION); }
+    function handleGlobalActivity() { resetInactivityTimer(); }
 
-                  let needsUpgrade = false;
-                  if (!dbForCheck) {
-                      needsUpgrade = true;
-                      DB_VERSION = 1;
-                  } else {
-                      DB_VERSION = dbForCheck.version;
-                      const existingStores = Array.from(dbForCheck.objectStoreNames);
-                      dbForCheck.close();
+    // --- EVENT HANDLING ---
+    function setupEvents() {
+        mainSlot.addEventListener('pointerdown', handleDragStart);
+        prevBtn.addEventListener('click', () => { if (BROWSER_UID > MIN_SLOT) requestSwitchTo(BROWSER_UID - 1); });
+        nextBtn.addEventListener('click', () => { if (BROWSER_UID < MAX_SLOT) requestSwitchTo(BROWSER_UID + 1); });
+        dockContainer.addEventListener('wheel', (e) => { e.preventDefault(); const direction = e.deltaY > 0 ? 1 : -1; const newId = BROWSER_UID + direction; if (newId >= MIN_SLOT && newId <= MAX_SLOT) requestSwitchTo(newId); }, { passive: false });
+        dockContainer.addEventListener('mouseenter', dispatchUIActivityEvent);
+        dockContainer.addEventListener('pointerdown', dispatchUIActivityEvent, { capture: true });
+        window.addEventListener('Z_UI_ACTIVITY', handleGlobalActivity);
+        const activityEvents = ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart'];
+        activityEvents.forEach(eventName => document.addEventListener(eventName, handleGlobalActivity, { capture: true, passive: true }));
 
-                      const storesToAdd = EXPECTED_STORES.filter(s => !existingStores.includes(s));
-                      const storesToRemove = existingStores.filter(s => !EXPECTED_STORES.includes(s));
+        // <<< HỆ THỐNG GIÁM SÁT ĐA TẦNG (Giữ nguyên) >>>
+        const debouncedFindIcon = debounce(findAndSetFavicon, 300);
+        headObserver = new MutationObserver(debouncedFindIcon);
+        const head = document.querySelector('head');
+        if (head) headObserver.observe(head, { childList: true, subtree: true });
+        titleObserver = new MutationObserver(debouncedFindIcon);
+        const titleElement = document.querySelector('head > title');
+        if (titleElement) titleObserver.observe(titleElement, { childList: true });
+        const wrapHistoryMethod = (method) => {
+            const original = history[method];
+            history[method] = function() {
+                const result = original.apply(this, arguments);
+                window.dispatchEvent(new Event(method.toLowerCase()));
+                return result;
+            };
+        };
+        wrapHistoryMethod('pushState');
+        wrapHistoryMethod('replaceState');
+        window.addEventListener('popstate', debouncedFindIcon);
+        window.addEventListener('pushstate', debouncedFindIcon);
+        window.addEventListener('replacestate', debouncedFindIcon);
 
-                      if (storesToAdd.length > 0 || storesToRemove.length > 0) {
-                          needsUpgrade = true;
-                          DB_VERSION++;
-                      }
-                  }
+        window.addEventListener('resize', handleWindowResize);
+    }
 
-                  if (needsUpgrade) {
-                      console.log(`[zDB] Schema change detected. Opening with new version: ${DB_VERSION}`);
-                      const db = await getDBConnection(DB_VERSION);
-                      db.close();
-                  } else {
-                      console.log('[zDB] Database schema is up-to-date.');
-                  }
+    // THAY ĐỔI 1: Tái cấu trúc Constrain Position để kẹp và căn giữa
+    function constrainPosition(currentLeft, currentTop) {
+        if (!dockContainer) return { x: 0, y: 0 };
 
-                  // Tạo kết nối chính để sử dụng
-                  _dbPromise = getDBConnection(DB_VERSION);
+        // Cần đảm bảo dockContainer có kích thước hợp lệ trước khi tính toán
+        // Dùng getBoundingClientRect() để đọc kích thước hiện tại, sau đó mới áp dụng kẹp
+        const rect = dockContainer.getBoundingClientRect();
 
-                  // Tạo API dùng chung
-                  window.ZSharedDB = {
-                      performTransaction: async (storeName, mode, action) => {
-                          if (!EXPECTED_STORES.includes(storeName)) {
-                               return Promise.reject(`[ZSharedDB] Error: Object store '${storeName}' is not defined in EXPECTED_STORES.`);
-                          }
-                          const db = await _dbPromise;
-                          return new Promise((resolve, reject) => {
-                              const transaction = db.transaction(storeName, mode);
-                              transaction.onerror = event => reject(event.target.error);
-                              const store = transaction.objectStore(storeName);
-                              const request = action(store);
-                              request.onsuccess = () => resolve(request.result);
-                              request.onerror = event => reject(event.target.error);
-                          });
-                      }
-                  };
+        // Tính toán Kẹp (Clamping)
+        const newX = Math.max(DOCK_PADDING, Math.min(currentLeft, window.innerWidth - rect.width - DOCK_PADDING));
+        const newY = Math.max(DOCK_PADDING, Math.min(currentTop, window.innerHeight - rect.height - DOCK_PADDING));
 
-                  console.log('[zDB] Database is ready.');
-                  window.ZDB_READY = true;
-                  document.dispatchEvent(new CustomEvent('ZDB_READY'));
+        // Áp dụng vị trí mới
+        dockContainer.style.left = `${newX}px`;
+        dockContainer.style.top = `${newY}px`;
 
-              } catch (error) {
-                  console.error('[zDB] Critical error during database initialization:', error);
-              }
-          }
+        return { x: newX, y: newY };
+    }
 
-          initializeDB();
-      })();
-  }
+    function handleWindowResize() {
+        clearTimeout(resizeDebounceTimer);
+        resizeDebounceTimer = setTimeout(async () => {
+            if (!dockContainer) return;
+            // Khi resize, ta cần căn giữa lại vị trí ngang để tránh bị lệch
+            const rect = dockContainer.getBoundingClientRect();
+            const centeredX = (window.innerWidth - rect.width) / 2;
+
+            // Giữ vị trí Y hiện tại, nhưng kẹp nó lại
+            const constrainedPos = constrainPosition(centeredX, rect.top);
+
+            // Lưu vị trí đã được căn giữa/kẹp
+            await Persistence.savePosition({ left: `${constrainedPos.x}px`, top: `${constrainedPos.y}px` });
+        }, 100);
+    }
+
+    // Xử lý kéo thả (Giữ nguyên logic kéo, nhưng gọi constrainPosition ở cuối)
+    function handleDragStart(e) {
+        if (e.button !== 0 || capturedPointerId !== null) return;
+        isDragging = false;
+        const targetSlot = e.currentTarget;
+        const rect = dockContainer.getBoundingClientRect();
+        dragStartOffset = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        capturedPointerId = e.pointerId;
+        targetSlot.setPointerCapture(capturedPointerId);
+        targetSlot.addEventListener('pointermove', handleDragMove);
+        targetSlot.addEventListener('pointerup', handleDragEnd, { once: true });
+        targetSlot.addEventListener('pointercancel', handleDragEnd, { once: true });
+    }
+    function handleDragMove(e) {
+        if (e.pointerId !== capturedPointerId) return;
+        if (!isDragging) { isDragging = true; dockContainer.style.transition = 'none'; }
+
+        // Sử dụng requestAnimationFrame để đảm bảo mượt mà (NFR)
+        requestAnimationFrame(() => {
+            let x = e.clientX - dragStartOffset.x;
+            let y = e.clientY - dragStartOffset.y;
+
+            // Kẹp vị trí ngay trong quá trình kéo
+            const rect = dockContainer.getBoundingClientRect();
+            x = Math.max(DOCK_PADDING, Math.min(x, window.innerWidth - rect.width - DOCK_PADDING));
+            y = Math.max(DOCK_PADDING, Math.min(y, window.innerHeight - rect.height - DOCK_PADDING));
+
+            dockContainer.style.left = `${x}px`;
+            dockContainer.style.top = `${y}px`;
+        });
+    }
+    async function handleDragEnd(e) {
+        if (e.pointerId !== capturedPointerId) return;
+        const targetSlot = e.currentTarget;
+        targetSlot.releasePointerCapture(capturedPointerId);
+        capturedPointerId = null;
+        targetSlot.removeEventListener('pointermove', handleDragMove);
+        targetSlot.removeEventListener('pointercancel', handleDragEnd);
+
+        if (isDragging) {
+            // Sau khi kéo, lưu vị trí tuyệt đối của dock trong viewport (rect.left/top)
+            const rect = dockContainer.getBoundingClientRect();
+            await Persistence.savePosition({ left: `${rect.left}px`, top: `${rect.top}px` });
+            dockContainer.style.transition = 'opacity 0.4s ease, transform 0.4s ease, visibility 0s 0s, box-shadow 0.3s ease';
+        }
+        requestAnimationFrame(() => { isDragging = false; });
+    }
+
+    // --- UTILITIES & FAVICON LOGIC (Giữ nguyên) ---
+    function debounce(func, delay) { let timeout; return function(...args) { clearTimeout(timeout); timeout = setTimeout(() => func.apply(this, args), delay); }; }
+    function findAndSetFavicon() {
+        if (BROWSER_UID !== 0) return;
+        const iconCandidates = [];
+        document.querySelectorAll('link[rel~="icon"], link[rel~="apple-touch-icon"], link[rel~="shortcut"]').forEach(link => {
+            const href = link.getAttribute('href');
+            if (!href || href.startsWith('data:')) return;
+            let size = 0;
+            const sizesAttr = link.getAttribute('sizes');
+            if (sizesAttr) { const sizeMatch = sizesAttr.match(/(\d+)x(\d+)/); if (sizeMatch) size = parseInt(sizeMatch[1], 10); }
+            let preference = 3;
+            if (link.rel.includes('apple-touch-icon')) preference = 1;
+            else if (size > 0) preference = 2;
+            iconCandidates.push({ href, size, preference });
+        });
+        iconCandidates.sort((a, b) => {
+            if (a.preference !== b.preference) return a.preference - b.preference;
+            return b.size - a.size;
+        });
+        let bestIconUrl = iconCandidates.length > 0 ? iconCandidates[0].href : null;
+        if (!bestIconUrl) { bestIconUrl = '/favicon.ico'; }
+        try { const finalUrl = new URL(bestIconUrl, window.location.href).href; if (finalUrl !== currentFaviconUrl) updateIcon(finalUrl); }
+        catch (error) { if (currentFaviconUrl !== 'default') updateIcon('default'); }
+    }
+    function updateIcon(url) {
+        if (!iconContainer) return;
+        if (url === 'default') { setSafeHTML(iconContainer, DEFAULT_ICON_SVG); currentFaviconUrl = 'default'; return; }
+        currentFaviconUrl = url;
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => { setSafeHTML(iconContainer, ''); iconContainer.appendChild(img); };
+        img.onerror = () => { if (currentFaviconUrl !== 'default') updateIcon('default'); };
+        img.src = url;
+    }
+
+    // --- INITIALIZATION & TEARDOWN ---
+    async function init() {
+        if (!document.body || document.getElementById('z-favicon-dock')) return;
+        createUI();
+        const savedPosition = await Persistence.loadPosition();
+
+        // THAY ĐỔI 2: Căn giữa ngang khi không có vị trí lưu trữ
+        if (savedPosition) {
+            // Khi load từ DB, áp dụng vị trí lưu trữ và kẹp nếu nó nằm ngoài bounds
+            dockContainer.style.left = savedPosition.left;
+            dockContainer.style.top = savedPosition.top;
+            constrainPosition(parseFloat(savedPosition.left), parseFloat(savedPosition.top));
+        } else {
+            requestAnimationFrame(() => {
+                const rect = dockContainer.getBoundingClientRect();
+                const centeredX = (window.innerWidth - rect.width) / 2;
+                dockContainer.style.left = `${centeredX}px`;
+                dockContainer.style.top = `${HORIZONTAL_CENTER_Y}px`; // Sát cạnh trên
+                // Lưu vị trí ban đầu
+                Persistence.savePosition({ left: `${centeredX}px`, top: `${HORIZONTAL_CENTER_Y}px` });
+            });
+        }
+        setupEvents();
+        updateDisplay();
+        resetInactivityTimer();
+        window.addEventListener('load', () => setTimeout(findAndSetFavicon, 500));
+    }
+
+    window.ZFaviconBarTeardown = () => {
+        window.removeEventListener('resize', handleWindowResize);
+        window.removeEventListener('Z_UI_ACTIVITY', handleGlobalActivity);
+        const activityEvents = ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart'];
+        activityEvents.forEach(eventName => document.removeEventListener(eventName, handleGlobalActivity, { capture: true }));
+        if (headObserver) headObserver.disconnect();
+        if (titleObserver) titleObserver.disconnect();
+        window.removeEventListener('popstate', findAndSetFavicon);
+        window.removeEventListener('pushstate', findAndSetFavicon);
+        window.removeEventListener('replacestate', findAndSetFavicon);
+        const dock = document.getElementById('z-favicon-dock');
+        if (dock) {
+            const mainSlot = dock.querySelector('#z-favicon-main-slot');
+            if (mainSlot && capturedPointerId) { try { mainSlot.releasePointerCapture(capturedPointerId); } catch(e) {} }
+            dock.remove();
+        }
+        document.getElementById('z-favicon-bar-styles')?.remove();
+        clearTimeout(resizeDebounceTimer);
+        clearTimeout(inactivityTimer);
+        window.ZFaviconBarInitialized = undefined;
+        delete window.ZFaviconBarTeardown; // Dọn dẹp tham chiếu
+    };
+
+    if (window.ZDB_READY) { init(); } else { document.addEventListener('ZDB_READY', init, { once: true }); }
+})();
 ''';
-
-
-
 
 const zContextMenu =
 '''
@@ -1271,272 +1475,391 @@ window.ZMediaPopupInitialized = true;
 
 const zZone =
 '''
-if (typeof window.ZUIExplorerInitialized === 'undefined') {
-    window.ZUIExplorerInitialized = true;
-    (function() {
-        let infoLabel, overlay;
-        let currentTarget = null;
-        let isPinned = false;
-        let lastMousePos = { x: 0, y: 0 };
-        let animationFrameId = null;
-        let resizeObserver = null;
-        let activityTimer = null;
-        let isExplorerActive = true;
-        const INACTIVITY_TIMEOUT = 1000;
-        let policy;
-        try {
-            policy = window.trustedTypes.createPolicy('z-ui-explorer-policy', { createHTML: string => string });
-        } catch(e) { policy = null; }
-        const setSafeHTML = (element, html) => {
-            if (policy) element.innerHTML = policy.createHTML(html);
-            else element.innerHTML = html;
-        };
-        function createUI() {
-            if (document.getElementById('z-explorer-overlay')) return;
-            const style = document.createElement('style');
-            style.textContent = `
-                :root {
-                    --z-explorer-highlight: #00BFFF;
-                    --z-explorer-highlight-bg: rgba(0, 191, 255, 0.1);
-                    --z-explorer-label-bg: rgba(30, 30, 30, 0.9);
-                    --z-explorer-label-border: rgba(255, 255, 255, 0.1);
-                    --z-explorer-success-color: #28a745;
-                }
-                .z-explorer-overlay {
-                    position: absolute;
-                    border: 1px solid var(--z-explorer-highlight);
-                    box-sizing: border-box;
-                    pointer-events: none;
-                    z-index: 2147483640;
-                    opacity: 0;
-                    transition: all 0.05s linear;
-                    border-radius: 4px;
-                    background-color: transparent;
-                }
-                .z-explorer-overlay.visible { opacity: 1; }
-                .z-explorer-overlay.pinned {
-                    background-color: var(--z-explorer-highlight-bg);
-                    border-style: solid;
-                }
-                .z-explorer-info-label {
-                    position: absolute;
-                    background-color: var(--z-explorer-label-bg);
-                    border: 1px solid var(--z-explorer-label-border);
-                    border-radius: 6px;
-                    padding: 4px 10px;
-                    font-family: 'Segoe UI', system-ui, sans-serif;
-                    font-size: 13px;
-                    line-height: 1.5;
-                    color: #f0f0f0;
-                    cursor: pointer;
-                    pointer-events: all;
-                    z-index: 2147483641;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-                    opacity: 0;
-                    transition: all 0.05s linear;
-                    white-space: nowrap;
-                    max-width: 400px;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    backdrop-filter: blur(8px);
-                }
-                .z-explorer-info-label.visible { opacity: 1; }
-                .z-explorer-info-label:hover { background-color: #333; }
-                .z-explorer-info-label.pinned {
-                    background-color: var(--z-explorer-highlight);
-                    border-color: #fff;
-                    cursor: default;
-                }
-            `;
-            document.head.appendChild(style);
-            overlay = document.createElement('div');
-            overlay.className = 'z-explorer-overlay';
-            infoLabel = document.createElement('div');
-            infoLabel.className = 'z-explorer-info-label';
-            document.body.appendChild(overlay);
-            document.body.appendChild(infoLabel);
-            document.addEventListener('mousemove', handleMouseMove, true);
-            infoLabel.onclick = handleLabelClick;
-            infoLabel.oncontextmenu = handleLabelRightClick;
-            resizeObserver = new ResizeObserver(entries => {
-                for (let entry of entries) {
-                    if (entry.target === currentTarget) {
-                        updateOverlayPosition(currentTarget);
-                    }
-                }
-            });
-            resetActivityTimer();
-        }
-        function resetActivityTimer() {
-            clearTimeout(activityTimer);
-            if (!isExplorerActive) {
-                isExplorerActive = true;
+if (typeof window.ZUIExplorerInitialized !== 'undefined') {
+    if (window.ZExplorerTeardown) window.ZExplorerTeardown();
+}
+window.ZUIExplorerInitialized = true;
+
+(function() {
+    // --- STATE & CONFIGURATION ---
+    let infoLabel, overlay;
+    let currentTarget = null;
+    let isPinned = false;
+    let lastMousePos = { x: 0, y: 0 };
+    let activityTimer = null;
+    let throttleTimer = null;
+    let resizeObserver = null;
+    let isExplorerActive = true;
+
+    const INACTIVITY_TIMEOUT = 3000; // Tăng thời gian chờ
+    const THROTTLE_INTERVAL = 50;
+    const ICONS = {
+        pin: `<svg viewBox="0 0 24 24"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>`,
+        unpin: `<svg viewBox="0 0 24 24"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle><line x1="2" y1="2" x2="22" y2="22"></line></svg>`,
+        trash: `<svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`
+    };
+
+    let policy;
+    try { policy = window.trustedTypes.createPolicy('z-ui-explorer-policy-v4-final', { createHTML: string => string }); } catch(e) {}
+    const setSafeHTML = (element, html) => { if (element && policy) element.innerHTML = policy.createHTML(html); else if (element) element.innerHTML = html; };
+
+    // --- CORE LOGIC ---
+    function createUI() {
+        const style = document.createElement('style');
+        style.id = 'z-explorer-styles';
+        style.textContent = `
+            :root {
+                --z-explorer-highlight: #0ea5e9; --z-explorer-highlight-bg: rgba(14, 165, 233, 0.15);
+                --z-explorer-label-bg: rgba(23, 23, 23, 0.9); --z-explorer-label-border: rgba(255, 255, 255, 0.2);
+                --z-explorer-success-color: #22c55e; --z-explorer-danger-color: #ef4444;
             }
-            activityTimer = setTimeout(deactivateExplorer, INACTIVITY_TIMEOUT);
+            /* THAY ĐỔI 1: Viền mỏng hơn */
+            .z-explorer-overlay { position: absolute; border: 1px solid var(--z-explorer-highlight); box-sizing: border-box; pointer-events: none; z-index: 2147483640; opacity: 0; transition: all 0.08s ease-out; border-radius: 4px; }
+            .z-explorer-overlay.visible { opacity: 1; }
+            .z-explorer-overlay.pinned { background-color: var(--z-explorer-highlight-bg); border-width: 2px; box-shadow: 0 0 10px var(--z-explorer-highlight); }
+
+            .z-explorer-info-label {
+                position: absolute; background-color: var(--z-explorer-label-bg); border: 1px solid var(--z-explorer-label-border); border-radius: 8px;
+                padding: 6px 12px; font-family: 'Segoe UI', system-ui, sans-serif; font-size: 13px; line-height: 1.4; color: #f0f0f0;
+                pointer-events: all; z-index: 2147483641; box-shadow: 0 6px 16px rgba(0,0,0,0.4); opacity: 0;
+                transition: opacity 0.1s linear, transform 0.1s linear; backdrop-filter: blur(12px) saturate(1.2);
+                display: flex; flex-direction: column; gap: 4px; min-width: 180px;
+            }
+            .z-explorer-info-label.visible { opacity: 1; }
+            .z-explorer-label-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+
+            /* THAY ĐỔI 3: Định dạng thông tin chi tiết */
+            .z-explorer-main-info {
+                display: flex; flex-wrap: wrap; gap: 8px 12px; font-size: 12px;
+            }
+            .z-explorer-info-part { white-space: nowrap; }
+            .z-explorer-tag-label, .z-explorer-id-label, .z-explorer-classes-label { color: #a1a1aa; margin-right: 2px; font-weight: normal; }
+
+            .z-explorer-pin-btn { color: var(--z-explorer-highlight); cursor: pointer; transition: all 0.2s; padding: 4px; margin: -4px; border-radius: 50%; }
+            .z-explorer-pin-btn:hover { background: rgba(14, 165, 233, 0.1); }
+            .z-explorer-pin-btn.pinned { color: var(--z-explorer-success-color); }
+            .z-explorer-tag { color: #e0e0e0; font-weight: bold; font-family: monospace; }
+            .z-explorer-id { color: var(--z-explorer-highlight); }
+            .z-explorer-classes { color: #f59e0b; }
+            .z-explorer-size { color: #a1a1aa; font-size: 11px; font-variant-numeric: tabular-nums; }
+
+            #z-explorer-actions {
+                display: none;
+                gap: 3px; border-top: 1px solid var(--z-explorer-label-border);
+                padding-top: 3px; margin-top: 2px;
+            }
+            .z-explorer-info-label.pinned #z-explorer-actions {
+                display: flex;
+            }
+
+            .z-explorer-action-btn { background: none; border: 1px solid #444; color: #aaa; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: all 0.2s; font-size: 11px; }
+            .z-explorer-action-btn:hover { background: #333; color: #fff; }
+            .z-explorer-action-btn.delete:hover { border-color: var(--z-explorer-danger-color); color: var(--z-explorer-danger-color); }
+            svg { width: 1em; height: 1em; vertical-align: middle; }
+        `;
+        document.head.appendChild(style);
+        overlay = document.createElement('div');
+        overlay.id = 'z-explorer-overlay';
+        overlay.className = 'z-explorer-overlay';
+        infoLabel = document.createElement('div');
+        infoLabel.id = 'z-explorer-info-label';
+        infoLabel.className = 'z-explorer-info-label';
+        // THAY ĐỔI 4: Cấu trúc HTML mới cho thông tin chi tiết
+        setSafeHTML(infoLabel, `
+            <div class="z-explorer-label-row">
+                <div id="z-explorer-main-info" class="z-explorer-main-info"></div>
+                <div id="z-explorer-pin-btn" class="z-explorer-pin-btn" title="Pin Element">${ICONS.pin}</div>
+            </div>
+            <div id="z-explorer-size-info" class="z-explorer-size"></div>
+            <div id="z-explorer-actions" class="z-explorer-actions">
+                <button class="z-explorer-action-btn" data-action="copy-css" title="Copy best CSS Selector">Copy CSS</button>
+                <button class="z-explorer-action-btn" data-action="copy-xpath" title="Copy XPath">Copy XPath</button>
+                <button class="z-explorer-action-btn delete" data-action="delete" title="Delete Element">${ICONS.trash}</button>
+            </div>
+        `);
+        document.body.appendChild(overlay);
+        document.body.appendChild(infoLabel);
+    }
+
+    function setupEvents() {
+        document.addEventListener('mousemove', handleMouseMove, { capture: true, passive: true });
+        infoLabel.querySelector('#z-explorer-pin-btn').addEventListener('click', handlePinClick);
+        infoLabel.querySelectorAll('.z-explorer-action-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => handleActionClick(e, btn.dataset.action));
+        });
+    }
+
+    // --- EVENT HANDLERS & STATE MANAGEMENT (Giữ nguyên) ---
+    function handleMouseMove(e) {
+        lastMousePos = { x: e.clientX, y: e.clientY };
+        resetActivityTimer();
+        if (isPinned) return;
+        if (!throttleTimer) {
+            throttleTimer = setTimeout(() => {
+                updateTargetOnFrame();
+                throttleTimer = null;
+            }, THROTTLE_INTERVAL);
         }
-        function deactivateExplorer() {
-            isExplorerActive = false;
+    }
+
+    function updateTargetOnFrame() {
+        if (isPinned || !isExplorerActive) return;
+        const element = findBestTarget();
+        if (element && element !== currentTarget) {
+            showOverlay(element);
+        } else if (!element && currentTarget) {
             hideOverlay();
         }
-        function getElementIdentifier(element) {
-            if (!element) return 'N/A';
-            let name = element.getAttribute('aria-label') || element.id || element.getAttribute('title') || element.getAttribute('name');
-            if (name) {
-                if (element.id && name === element.id) name = '#' + name;
-                return name.substring(0, 255);
-            }
-            if (element.className && typeof element.className === 'string') {
-                const classes = element.className.trim().split(/\s+/).filter(c => c && typeof c === 'string').join('.');
-                if (classes) return `.${classes}`.substring(0, 255);
-            }
-            return element.tagName.toLowerCase();
-        }
-        function getElementUnderMouse() {
-            overlay.style.visibility = 'hidden';
-            infoLabel.style.visibility = 'hidden';
-            let element = document.elementFromPoint(lastMousePos.x, lastMousePos.y);
-            overlay.style.visibility = 'visible';
-            infoLabel.style.visibility = 'visible';
-            while (element && element.shadowRoot) {
-                const deeperElement = element.shadowRoot.elementFromPoint(lastMousePos.x, lastMousePos.y);
-                if (deeperElement && deeperElement !== element) {
-                    element = deeperElement;
-                } else {
-                    break;
-                }
-            }
-            return element;
-        }
-        function handleMouseMove(e) {
-            lastMousePos = { x: e.clientX, y: e.clientY };
-            resetActivityTimer();
-            if (!animationFrameId && !isPinned) {
-                animationFrameId = requestAnimationFrame(updateTargetOnFrame);
-            }
-        }
-        function updateTargetOnFrame() {
-            animationFrameId = null;
-            if (isPinned || !isExplorerActive) return;
-            const element = findBestTarget(lastMousePos.x, lastMousePos.y);
-            if (element && element !== currentTarget) {
-                showOverlay(element);
-            } else if (!element && currentTarget) {
-                hideOverlay();
-            }
-        }
-        function findBestTarget(x, y) {
-            const element = getElementUnderMouse();
-            if (!element || element === overlay || element === infoLabel || element === document.documentElement || element === document.body) {
-                return null;
-            }
-            const rect = element.getBoundingClientRect();
-            if (rect.width < 5 || rect.height < 5) return null;
-            return element;
-        }
-        function updateOverlayPosition(element) {
-            const rect = element.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0 || !document.body.contains(element)) {
-                hideOverlay();
-                return;
-            }
-            overlay.style.top = `${rect.top + window.scrollY}px`;
-            overlay.style.left = `${rect.left + window.scrollX}px`;
-            overlay.style.width = `${rect.width}px`;
-            overlay.style.height = `${rect.height}px`;
-            const labelRect = infoLabel.getBoundingClientRect();
-            const margin = 8;
-            let top = rect.top - labelRect.height - margin;
-            if (top < 0) {
-                top = rect.bottom + margin;
-            }
-            let left = rect.left + (rect.width / 2) - (labelRect.width / 2);
-            left = Math.max(margin, Math.min(left, window.innerWidth - labelRect.width - margin));
-            infoLabel.style.top = `${top + window.scrollY}px`;
-            infoLabel.style.left = `${left + window.scrollX}px`;
-            setSafeHTML(infoLabel, getElementIdentifier(element));
-        }
-        function showOverlay(element) {
-            if (currentTarget) {
-                resizeObserver.unobserve(currentTarget);
-            }
-            currentTarget = element;
-            resizeObserver.observe(currentTarget);
-            updateOverlayPosition(element);
-            overlay.classList.add('visible');
-            infoLabel.classList.add('visible');
-        }
-        function hideOverlay() {
-            if (isPinned) return;
-            overlay.classList.remove('visible');
-            infoLabel.classList.remove('visible');
-            if (currentTarget) {
-                resizeObserver.unobserve(currentTarget);
-                currentTarget = null;
-            }
-        }
-        function handleLabelClick(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            isPinned = !isPinned;
-            overlay.classList.toggle('pinned', isPinned);
-            infoLabel.classList.toggle('pinned', isPinned);
-            if (isPinned) {
-                clearTimeout(activityTimer);
-            } else {
-                resetActivityTimer();
-                handleMouseMove({clientX: lastMousePos.x, clientY: lastMousePos.y});
-            }
-        }
-        function handleLabelRightClick(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            if (currentTarget) {
-                const selector = getCssSelector(currentTarget);
-                navigator.clipboard.writeText(selector)
-                    .then(() => {
-                        const originalText = infoLabel.textContent;
-                        const originalBg = infoLabel.style.backgroundColor;
-                        infoLabel.textContent = 'Selector Copied!';
-                        infoLabel.style.backgroundColor = 'var(--z-explorer-highlight)';
-                        setTimeout(() => {
-                            infoLabel.textContent = originalText;
-                            infoLabel.style.backgroundColor = originalBg;
-                        }, 1200);
-                    })
-                    .catch(err => console.error('Failed to copy selector:', err));
-            }
-        }
-        function getCssSelector(el) {
-            if (!(el instanceof Element)) return;
-            let path = [], parent;
-            while (parent = el.parentNode) {
-                let tag = el.tagName, siblings;
-                path.unshift(
-                    el.id ? `#${el.id.replace(/:/g, '\\\\:')}` : (
-                        siblings = Array.from(parent.children).filter(child => child.tagName === tag),
-                        siblings.length > 1 ? `${tag}:nth-child(${1 + siblings.indexOf(el)})` : tag
-                    )
-                );
-                el = parent;
-            }
-            return `${path.join(' > ')}`.toLowerCase();
-        }
-        if (document.readyState === 'complete') {
-            createUI();
+    }
+
+    function handlePinClick(e) {
+        e.stopPropagation();
+        if (!currentTarget) return;
+        isPinned = !isPinned;
+
+        infoLabel.classList.toggle('pinned', isPinned);
+        overlay.classList.toggle('pinned', isPinned);
+
+        const pinBtn = infoLabel.querySelector('#z-explorer-pin-btn');
+        pinBtn.classList.toggle('pinned', isPinned);
+        setSafeHTML(pinBtn, isPinned ? ICONS.unpin : ICONS.pin);
+        pinBtn.title = isPinned ? 'Unpin Element' : 'Pin Element';
+
+        if (isPinned) {
+            clearTimeout(activityTimer);
         } else {
-            window.addEventListener('load', createUI);
+            resetActivityTimer();
+            updateTargetOnFrame();
         }
-    })();
-}
+    }
+
+    function handleActionClick(e, action) {
+        e.stopPropagation();
+        if (!currentTarget) return;
+        let content;
+        switch (action) {
+            case 'copy-css':
+                content = getCssSelector(currentTarget);
+                navigator.clipboard.writeText(content).then(() => showFeedback(e.target, 'Copied!'));
+                break;
+            case 'copy-xpath':
+                content = getXPath(currentTarget);
+                navigator.clipboard.writeText(content).then(() => showFeedback(e.target, 'Copied!'));
+                break;
+            case 'delete':
+                if (currentTarget && currentTarget !== document.body && currentTarget !== document.documentElement) {
+                    currentTarget.remove();
+                    hideOverlay(true);
+                }
+                break;
+        }
+    }
+
+    function showOverlay(element) {
+        if (currentTarget && resizeObserver) resizeObserver.unobserve(currentTarget);
+        currentTarget = element;
+        if(resizeObserver) resizeObserver.observe(currentTarget);
+        updateOverlayPosition(element);
+        overlay.classList.add('visible');
+        infoLabel.classList.add('visible');
+    }
+
+    function hideOverlay(force = false) {
+        if (isPinned && !force) return;
+        overlay.classList.remove('visible');
+        infoLabel.classList.remove('visible');
+        if (currentTarget && resizeObserver) {
+            resizeObserver.unobserve(currentTarget);
+            currentTarget = null;
+        }
+        if (force) {
+            isPinned = false;
+            infoLabel.classList.remove('pinned');
+            overlay.classList.remove('pinned');
+            const pinBtn = infoLabel.querySelector('#z-explorer-pin-btn');
+            pinBtn.classList.remove('pinned');
+            setSafeHTML(pinBtn, ICONS.pin);
+            pinBtn.title = 'Pin Element';
+        }
+    }
+
+    // --- THAY ĐỔI LỚN TẬP TRUNG VÀO VỊ TRÍ VÀ THÔNG TIN ---
+    function updateOverlayPosition(element) {
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0 || !document.body.contains(element)) { hideOverlay(true); return; }
+
+        // Cập nhật Overlay
+        overlay.style.top = `${rect.top + window.scrollY}px`;
+        overlay.style.left = `${rect.left + window.scrollX}px`;
+        overlay.style.width = `${rect.width}px`;
+        overlay.style.height = `${rect.height}px`;
+
+        // 1. Cập nhật Thông tin (Chi tiết hơn)
+        const identifiers = getElementIdentifier(element);
+        const sizeInfo = `${Math.round(rect.width)}x${Math.round(rect.height)} px`;
+
+        const parts = [];
+        // TAG
+        parts.push(`<div class="z-explorer-info-part"><span class="z-explorer-tag-label">TAG:</span> <span class="z-explorer-tag">${identifiers.tag}</span></div>`);
+        // ID
+        if (identifiers.id) {
+            parts.push(`<div class="z-explorer-info-part"><span class="z-explorer-id-label">ID:</span> <span class="z-explorer-id">#${identifiers.id}</span></div>`);
+        }
+        // CLASSES (Hiển thị tối đa 3 class quan trọng nhất)
+        if (identifiers.classes) {
+            const classList = identifiers.classes.split('.').slice(0, 3).join(' ');
+            parts.push(`<div class="z-explorer-info-part"><span class="z-explorer-classes-label">CLS:</span> <span class="z-explorer-classes">.${classList}</span></div>`);
+        }
+
+        setSafeHTML(infoLabel.querySelector('#z-explorer-main-info'), parts.join(''));
+        infoLabel.querySelector('#z-explorer-size-info').textContent = sizeInfo;
+
+        // Cần đảm bảo infoLabel đã có kích thước chính xác sau khi setHTML
+        const labelHeight = infoLabel.offsetHeight;
+        const labelWidth = infoLabel.offsetWidth;
+
+        // 2. Định vị sát viền và Clamping Viewport
+
+        const margin = 5; // Độ đệm sát viền (giảm từ 10 xuống 5)
+
+        // Tọa độ Viewport (client coordinates)
+
+        // Vị trí Ngang (Left edge alignment)
+        let left = rect.left + margin;
+
+        // Vị trí Dọc (Ưu tiên đặt trên element)
+        let top = rect.top - labelHeight - margin;
+
+        // --- CLAMPING DỌC ---
+
+        // Nếu tràn trên (top < margin), đặt xuống dưới
+        if (top < margin) {
+            top = rect.bottom + margin;
+        }
+
+        // Đảm bảo không tràn dưới
+        const maxTop = window.innerHeight - labelHeight - margin;
+        top = Math.min(top, maxTop);
+
+        // Nếu element quá cao (hoặc quá sát cạnh) khiến top vẫn bị đẩy lên quá, kẹp nó lại
+        top = Math.max(top, margin);
+
+        // --- CLAMPING NGANG ---
+
+        // Đảm bảo không tràn phải
+        const maxLeft = window.innerWidth - labelWidth - margin;
+        left = Math.min(left, maxLeft);
+
+        // Đảm bảo không tràn trái
+        left = Math.max(left, margin);
+
+        // Áp dụng tọa độ tuyệt đối (Absolute coordinates = Viewport + Scroll)
+        infoLabel.style.top = `${top + window.scrollY}px`;
+        infoLabel.style.left = `${left + window.scrollX}px`;
+    }
+
+    function resetActivityTimer() {
+        clearTimeout(activityTimer);
+        isExplorerActive = true;
+        activityTimer = setTimeout(() => {
+            isExplorerActive = false;
+            if (!isPinned) hideOverlay();
+        }, INACTIVITY_TIMEOUT);
+    }
+
+    // --- UTILITY FUNCTIONS (Giữ nguyên) ---
+    function getElementIdentifier(element) {
+        if (!element) return { tag: 'N/A', id: '', classes: '' };
+        const tag = element.tagName.toLowerCase();
+        const id = element.id || '';
+        const classes = (element.className && typeof element.className === 'string') ? element.className.trim().split(/\s+/).filter(Boolean).join('.') : '';
+        return { tag, id, classes };
+    }
+
+    function getElementUnderMouse() {
+        if (!overlay || !infoLabel) return null;
+        overlay.style.visibility = 'hidden'; infoLabel.style.visibility = 'hidden';
+        let element = document.elementFromPoint(lastMousePos.x, lastMousePos.y);
+        overlay.style.visibility = 'visible'; infoLabel.style.visibility = 'visible';
+        while (element && element.shadowRoot) {
+            const deeperElement = element.shadowRoot.elementFromPoint(lastMousePos.x, lastMousePos.y);
+            if (deeperElement && deeperElement !== element) element = deeperElement;
+            else break;
+        }
+        return element;
+    }
+
+    function findBestTarget() {
+        const element = getElementUnderMouse();
+        if (!element || element === overlay || element === infoLabel || element === document.documentElement || element === document.body) return null;
+        const rect = element.getBoundingClientRect();
+        if (rect.width < 5 || rect.height < 5) return null;
+        return element;
+    }
+
+    function getCssSelector(el) {
+        if (!(el instanceof Element)) return '';
+        let path = [], parent;
+        while (parent = el.parentNode) {
+            const tag = el.tagName.toLowerCase();
+            if (el.id) { path.unshift(`#${el.id.replace(/:/g, '\\\\:')}`); break; }
+            else {
+                let siblings = Array.from(parent.children);
+                let sameTagSiblings = siblings.filter(sibling => sibling.tagName === el.tagName);
+                if (sameTagSiblings.length > 1) {
+                    let index = sameTagSiblings.indexOf(el) + 1;
+                    path.unshift(`${tag}:nth-of-type(${index})`);
+                } else { path.unshift(tag); }
+            }
+            el = parent;
+        }
+        return path.join(' > ');
+    }
+
+    function getXPath(element) {
+        if (element.id !== '') return `id("${element.id}")`;
+        if (element === document.body) return element.tagName.toLowerCase();
+        let ix = 0;
+        const siblings = element.parentNode.childNodes;
+        for (let i = 0; i < siblings.length; i++) {
+            const sibling = siblings[i];
+            if (sibling === element) return `${getXPath(element.parentNode)}/${element.tagName.toLowerCase()}[${ix + 1}]`;
+            if (sibling.nodeType === 1 && sibling.tagName === element.tagName) ix++;
+        }
+        return '';
+    }
+
+    function showFeedback(element, message) {
+        const originalText = element.textContent;
+        element.textContent = message;
+        element.style.color = 'var(--z-explorer-success-color)';
+        setTimeout(() => { element.textContent = originalText; element.style.color = ''; }, 1200);
+    }
+
+    // --- INITIALIZATION & TEARDOWN ---
+    function init() {
+        if (!document.body) { setTimeout(init, 50); return; }
+        createUI();
+        setupEvents();
+        if ('ResizeObserver' in window) {
+            resizeObserver = new ResizeObserver(() => { if (isPinned && currentTarget) updateOverlayPosition(currentTarget); });
+        }
+        resetActivityTimer();
+    }
+
+    window.ZTeardown = () => {
+        document.removeEventListener('mousemove', handleMouseMove, { capture: true });
+        if (resizeObserver) resizeObserver.disconnect();
+        document.getElementById('z-explorer-overlay')?.remove();
+        document.getElementById('z-explorer-info-label')?.remove();
+        document.getElementById('z-explorer-styles')?.remove();
+        clearTimeout(activityTimer); clearTimeout(throttleTimer);
+        window.ZUIExplorerInitialized = undefined;
+    };
+
+    init();
+})();
 ''';
-
-
-
-
-
-
-
-
 
 
 const zMiniAlbum =
@@ -2741,8 +3064,18 @@ window.ZKeyMapperInitialized = true;
     const STORE_NAME = 'zKeyMapperState';
     const STATE_KEY = 'lastState';
 
+    // --- IMPORTED FAVICON BAR CONSTANTS ---
+    const BROWSER_UID = typeof window.Z_BROWSER_UID === 'number' ? window.Z_BROWSER_UID : 0;
+    const MIN_SLOT = 0;
+    const MAX_SLOT = 12;
+
     let debounceTimer = null;
     let inactivityTimer = null;
+    // --- FAVICON STATE AND OBSERVERS ---
+    let currentFaviconUrl = 'default';
+    let headObserver = null;
+    let titleObserver = null;
+    // -----------------------------------
     const INACTIVITY_DURATION = 3000;
     const MAX_RENDER_LINES = 10;
     let CURRENT_URL = window.location.href;
@@ -2764,9 +3097,13 @@ window.ZKeyMapperInitialized = true;
     };
 
     const ICONS = {
-        settings: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06-.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"></path></svg>`
+        prev: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>`,
+        next: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>`,
+        defaultFavicon: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`
     };
 
+    // --- UTILITIES ---
+    function debounce(func, delay) { let timeout; return function(...args) { clearTimeout(timeout); timeout = setTimeout(() => func.apply(this, args), delay); }; }
     let policy;
     try {
         policy = window.trustedTypes.createPolicy('z-keymapper-policy', { createHTML: string => string });
@@ -2795,6 +3132,80 @@ window.ZKeyMapperInitialized = true;
             }
         }
     };
+
+    // --- NAVIGATION LOGIC ---
+    function requestSwitchTo(slotId) {
+        if (window.chrome && window.chrome.webview) {
+            const payload = { type: 'ZFaviconBarSwitch', data: { switchToId: parseInt(slotId, 10) } };
+            window.chrome.webview.postMessage(JSON.stringify(payload));
+        } else { console.log(`[ZKeyMapper] Request switch to UID: ${slotId}`); }
+    }
+
+    function updateNavigationButtons() {
+        if (appState.dom.prevBtn && appState.dom.nextBtn) {
+            appState.dom.prevBtn.classList.toggle('disabled', BROWSER_UID <= MIN_SLOT);
+            appState.dom.nextBtn.classList.toggle('disabled', BROWSER_UID >= MAX_SLOT);
+        }
+    }
+
+    // --- FAVICON LOGIC ---
+    function updateIcon(url) {
+        const mainSlot = appState.dom.mainSlot;
+        if (!mainSlot) return;
+
+        if (url === 'default') {
+            setHTML(mainSlot, ICONS.defaultFavicon);
+            currentFaviconUrl = 'default';
+            return;
+        }
+        currentFaviconUrl = url;
+
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => { setHTML(mainSlot, ''); mainSlot.appendChild(img); };
+        img.onerror = () => { if (currentFaviconUrl !== 'default') updateIcon('default'); };
+
+        img.src = url;
+    }
+
+    const debouncedFindIcon = debounce(findAndSetFavicon, 300);
+
+    function findAndSetFavicon() {
+        const iconCandidates = [];
+        document.querySelectorAll('link[rel~="icon"], link[rel~="apple-touch-icon"], link[rel~="shortcut"]').forEach(link => {
+            const href = link.getAttribute('href');
+            if (!href || href.startsWith('data:')) return;
+            let size = 0;
+            const sizesAttr = link.getAttribute('sizes');
+            if (sizesAttr) { const sizeMatch = sizesAttr.match(/(\d+)x(\d+)/); if (sizeMatch) size = parseInt(sizeMatch[1], 10); }
+            let preference = 3;
+            if (link.rel.includes('apple-touch-icon')) preference = 1;
+            else if (size > 0) preference = 2;
+            iconCandidates.push({ href, size, preference });
+        });
+
+        iconCandidates.sort((a, b) => {
+            if (a.preference !== b.preference) return a.preference - b.preference;
+            return b.size - a.size;
+        });
+
+        let bestIconUrl = iconCandidates.length > 0 ? iconCandidates[0].href : null;
+        if (!bestIconUrl) { bestIconUrl = '/favicon.ico'; }
+
+        try {
+            const finalUrl = new URL(bestIconUrl, window.location.href).href;
+            if (finalUrl !== currentFaviconUrl) updateIcon(finalUrl);
+        }
+        catch (error) {
+            if (currentFaviconUrl !== 'default') updateIcon('default');
+        }
+    }
+
+    function updateMainSlotContent() {
+        findAndSetFavicon();
+        updateNavigationButtons();
+    }
+    // ------------------------------------
 
     function generateRandomColor() {
         const hue = (Math.random() * 360);
@@ -2834,37 +3245,66 @@ window.ZKeyMapperInitialized = true;
         }
     }
 
+    // --- FIX: VIẾT LẠI HÀM applyPosition ĐỂ ĐẢM BẢO TÍNH TOÁN TỌA ĐỘ PIXEL LUÔN CHÍNH XÁC ---
     function applyPosition() {
         const panel = appState.dom.panelContainer;
         if (!panel) return;
 
+        // Bắt buộc sử dụng tọa độ CSS mặc định (nếu có) để tính toán kích thước ban đầu
         Object.assign(panel.style, {
-            left: appState.position.left,
-            top: appState.position.top,
-            bottom: appState.position.bottom,
-            transform: appState.position.transform
+            left: '50%',
+            top: 'auto',
+            bottom: '5px',
+            transform: 'translateX(-50%)'
         });
 
-        // Force reflow to get correct dimensions after applying styles
+        // Buộc trình duyệt tính toán kích thước
         panel.getBoundingClientRect();
 
-        const rect = panel.getBoundingClientRect();
+        const rectWidth = panel.offsetWidth;
+        const rectHeight = panel.offsetHeight;
         const padding = 5;
-        let needsCorrection = false;
-        let newLeft = rect.left;
-        let newTop = rect.top;
 
-        if (rect.right > window.innerWidth - padding) { newLeft = window.innerWidth - rect.width - padding; needsCorrection = true; }
-        if (rect.left < padding) { newLeft = padding; needsCorrection = true; }
-        if (rect.bottom > window.innerHeight - padding) { newTop = window.innerHeight - rect.height - padding; needsCorrection = true; }
-        if (rect.top < padding) { newTop = padding; needsCorrection = true; }
+        let targetLeft;
+        let targetTop;
 
-        if (needsCorrection) {
-             panel.style.left = `${newLeft}px`;
-             panel.style.top = `${newTop}px`;
-             panel.style.bottom = 'auto';
-             panel.style.transform = 'none';
+        // 1. Xác định tọa độ cơ sở (VIEWPORT coordinates)
+        if (appState.position.isDefault) {
+            // Trường hợp mặc định: Bottom Center
+            targetLeft = (window.innerWidth / 2) - (rectWidth / 2);
+            targetTop = window.innerHeight - rectHeight - padding;
+
+            // Nếu mặc định, ta chỉ cần tọa độ pixel, không cần CSS Centering phức tạp.
+        } else {
+            // Trường hợp đã kéo: Chuyển đổi tọa độ đã lưu sang pixel
+
+            // Xử lý Top/Bottom đã lưu
+            if (appState.position.top !== 'auto') {
+                targetTop = parseInt(appState.position.top, 10);
+            } else {
+                // Nếu lưu bằng bottom (khoảng cách từ đáy)
+                targetTop = window.innerHeight - rectHeight - parseInt(appState.position.bottom, 10);
+            }
+
+            // Xử lý Left đã lưu
+            targetLeft = parseInt(appState.position.left, 10);
         }
+
+        // 2. Áp dụng Clamping (Kiểm tra và hiệu chỉnh nếu tràn Viewport)
+
+        // Hiệu chỉnh Left
+        targetLeft = Math.max(padding, Math.min(targetLeft, window.innerWidth - rectWidth - padding));
+
+        // Hiệu chỉnh Top
+        targetTop = Math.max(padding, Math.min(targetTop, window.innerHeight - rectHeight - padding));
+
+        // 3. Áp dụng Final CSS (Luôn dùng tọa độ pixel tuyệt đối để tránh xung đột)
+        Object.assign(panel.style, {
+            left: `${targetLeft}px`,
+            top: `${targetTop}px`,
+            bottom: 'auto',
+            transform: 'none'
+        });
     }
 
     function handleWindowResize() {
@@ -2880,13 +3320,18 @@ window.ZKeyMapperInitialized = true;
         const rect = panel.getBoundingClientRect();
         appState.dragStart.initialX = e.clientX;
         appState.dragStart.initialY = e.clientY;
+
+        // Bắt đầu kéo từ vị trí đang hiển thị
         appState.dragStart.x = e.clientX - rect.left;
         appState.dragStart.y = e.clientY - rect.top;
         panel.style.transition = 'none';
+
+        // Đảm bảo panel đang ở tọa độ pixel để bắt đầu kéo trơn tru
         panel.style.left = `${rect.left}px`;
         panel.style.top = `${rect.top}px`;
         panel.style.transform = 'none';
         panel.style.bottom = 'auto';
+
         document.addEventListener('mousemove', handleDragMove);
         document.addEventListener('mouseup', handleDragEnd, { once: true });
     }
@@ -2904,9 +3349,6 @@ window.ZKeyMapperInitialized = true;
         }
     }
 
-    // ==============================================================================
-    // LOGIC ĐỊNH VỊ THÔNG MINH
-    // ==============================================================================
     async function handleDragEnd(e) {
         if (!appState.isDragging) return;
         appState.isDragging = false;
@@ -2920,6 +3362,7 @@ window.ZKeyMapperInitialized = true;
             let rect = panel.getBoundingClientRect();
             const padding = 5;
 
+            // Tính toán vị trí cuối cùng sau khi đã kẹp vào viewport (đã là tọa độ pixel)
             let finalLeft = Math.max(padding, Math.min(rect.left, window.innerWidth - rect.width - padding));
             let finalTop = Math.max(padding, Math.min(rect.top, window.innerHeight - rect.height - padding));
 
@@ -2927,30 +3370,34 @@ window.ZKeyMapperInitialized = true;
             appState.position.transform = 'none';
             appState.position.left = `${finalLeft}px`;
 
-            // Quyết định lưu 'top' hay 'bottom'
+            // Lưu trữ vị trí: Nếu ở nửa trên màn hình thì lưu top, nếu nửa dưới thì lưu bottom
             if (finalTop > window.innerHeight / 2) {
+                // Tính khoảng cách từ đáy (bottom)
                 appState.position.bottom = `${window.innerHeight - finalTop - rect.height}px`;
                 appState.position.top = 'auto';
             } else {
+                // Tính khoảng cách từ đỉnh (top)
                 appState.position.top = `${finalTop}px`;
                 appState.position.bottom = 'auto';
             }
 
-            // Áp dụng vị trí mới ngay lập tức
+            // Áp dụng vị trí mới (Hàm applyPosition sẽ chuyển đổi lại thành top/left pixel)
             applyPosition();
-
             await Persistence.saveState({ position: appState.position });
         }
 
-        appState.dom.panelContainer.style.transition = 'opacity 0.4s ease, transform 0.4s ease, visibility 0.4s';
+        appState.dom.panelContainer.style.transition = 'opacity 0.4s ease, transform 0.4s ease, visibility 0s 0s';
         resetInactivityTimer();
     }
+    // ... (Phần còn lại của code được giữ nguyên)
+    // --- (Phần code sau đây được giữ nguyên) ---
 
     function updatePlaceholder() {
         const newUrl = window.location.href;
         if (appState.dom.editor && appState.dom.editor.dataset.placeholder !== newUrl) {
             appState.dom.editor.dataset.placeholder = newUrl;
         }
+        debouncedFindIcon();
     }
 
     function handleSettingsClick() {
@@ -2970,13 +3417,15 @@ window.ZKeyMapperInitialized = true;
         const selection = window.getSelection();
         let isTextSelected = selection && !selection.isCollapsed;
         const rawText = appState.rawText;
-        const lines = rawText.split('\\n');
+
+        const lines = rawText.split('\n');
         const visibleLines = lines.slice(-MAX_RENDER_LINES);
-        const textToRender = visibleLines.join('\\n');
+        const textToRender = visibleLines.join('\n');
+
         const tokens = textToRender.split(/([^\p{L}\p{N}]+)/u).filter(Boolean);
         let outputHTML = '';
         tokens.forEach(token => {
-            if (token === '\\n') { outputHTML += '<br>'; return; }
+            if (token === '\n') { outputHTML += '<br>'; return; }
             const color = getColorForWord(token);
             if (color) {
                 outputHTML += `<span class="z-word-tag" style="color:${color};" title="Click to send '${token}'">${token}</span>`;
@@ -3017,13 +3466,14 @@ window.ZKeyMapperInitialized = true;
         style.textContent = `
             .panel-container {
                 position: fixed;
-                width: 400px;
-                max-width: 33vw;
+                width: 90vw;
+                max-width: 500px;
+                min-width: 250px;
                 max-height: calc(1.5em * 10 + 30px);
                 display: flex;
                 flex-direction: column;
                 z-index: 2147483647;
-                padding: 8px;
+                padding: 5px;
                 font-family: monospace, sans-serif;
                 font-size: 16px;
                 line-height: 1.5;
@@ -3043,12 +3493,12 @@ window.ZKeyMapperInitialized = true;
             }
             .chat-wrapper {
                 display: flex;
-                align-items: flex-start;
-                gap: 8px;
+                align-items: center;
+                gap: 4px;
                 background-color: rgba(30, 30, 30, 0.95);
                 border: 1px solid #444;
                 border-radius: 12px;
-                padding: 6px 15px 6px 6px;
+                padding: 3px;
                 flex-grow: 1;
                 cursor: text;
                 transition: border-color 0.3s ease, background-color 0.3s ease;
@@ -3056,13 +3506,15 @@ window.ZKeyMapperInitialized = true;
             .editor {
                 position: relative;
                 flex-grow: 1;
-                min-height: 24px;
+                min-height: 32px;
                 outline: none;
                 caret-color: white;
                 white-space: pre-wrap;
                 color: white;
                 overflow-y: auto;
-                padding: 4px 0;
+                overflow-x: hidden; /* FIX 2: Loại bỏ thanh cuộn ngang */
+                /* FIX 1: Tăng padding top để căn chỉnh visual center */
+                padding: 6px 0 2px 0;
                 max-height: 150px;
                 transition: color 0.4s ease, opacity 0.4s ease;
             }
@@ -3072,7 +3524,8 @@ window.ZKeyMapperInitialized = true;
                 cursor: text;
                 pointer-events: none;
                 position: absolute;
-                top: 4px; left: 0;
+                top: 6px; /* Điều chỉnh để khớp với padding mới */
+                left: 0;
                 width: 100%;
                 white-space: nowrap;
                 overflow: hidden;
@@ -3097,10 +3550,10 @@ window.ZKeyMapperInitialized = true;
                 outline: 1px solid rgba(0, 0, 0, 0.8);
             }
             .icon-btn {
-                width: 36px;
-                height: 36px;
-                min-width: 36px;
-                min-height: 36px;
+                width: 32px;
+                height: 32px;
+                min-width: 32px;
+                min-height: 32px;
                 display: flex;
                 justify-content: center;
                 align-items: center;
@@ -3110,38 +3563,97 @@ window.ZKeyMapperInitialized = true;
                 flex-shrink: 0;
                 cursor: pointer;
             }
-            .settings-btn {
-                color: #0ea5e9;
-                cursor: grab;
-                align-self: center;
+            .nav-btn {
+                 color: #a1a1aa;
             }
-            .settings-btn:active { cursor: grabbing; }
-            .settings-btn:hover { background-color: rgba(255,255,255,0.15); }
+            .nav-btn.disabled {
+                 opacity: 0.4;
+                 cursor: not-allowed;
+            }
+            .nav-btn:not(.disabled):hover { background-color: rgba(255,255,255,0.1); color: #fff; }
+
+            .main-slot {
+                color: #0ea5e9;
+                font-weight: bold;
+                cursor: grab;
+                border: 2px solid rgba(0, 191, 255, 0.5);
+                background-color: rgba(0, 0, 0, 0.1);
+            }
+            .main-slot:active { cursor: grabbing; }
+            .main-slot:hover { background-color: rgba(0, 191, 255, 0.1); }
+            /* Thêm style cho img/svg bên trong main-slot */
+            .main-slot img, .main-slot svg {
+                width: 80%;
+                height: 80%;
+                object-fit: contain;
+                pointer-events: none;
+            }
         `;
         shadowRoot.appendChild(style);
         const panelContainer = document.createElement('div');
         panelContainer.className = 'panel-container';
-        setHTML(panelContainer, `<div class="chat-wrapper"><div id="z-keymapper-settings-btn" class="icon-btn settings-btn" title="Drag to move / Click to open Kernel">${ICONS.settings}</div><div class="editor" contenteditable="true" spellcheck="false" data-placeholder="${CURRENT_URL}"></div></div>`);
+
+        setHTML(panelContainer, `
+            <div class="chat-wrapper">
+                <div id="z-keymapper-prev-btn" class="icon-btn nav-btn" title="Previous Tab">${ICONS.prev}</div>
+                <div id="z-keymapper-main-slot" class="icon-btn main-slot" title="Drag to move / Click to open Kernel">${ICONS.defaultFavicon}</div>
+                <div id="z-keymapper-next-btn" class="icon-btn nav-btn" title="Next Tab">${ICONS.next}</div>
+                <div class="editor" contenteditable="true" spellcheck="false" data-placeholder="${CURRENT_URL}"></div>
+            </div>
+        `);
         shadowRoot.appendChild(panelContainer);
         appState.dom = {
             shadowHost, panelContainer,
             chatWrapper: panelContainer.querySelector('.chat-wrapper'),
             editor: panelContainer.querySelector('.editor'),
-            settingsBtn: panelContainer.querySelector('#z-keymapper-settings-btn')
+            prevBtn: panelContainer.querySelector('#z-keymapper-prev-btn'),
+            mainSlot: panelContainer.querySelector('#z-keymapper-main-slot'),
+            nextBtn: panelContainer.querySelector('#z-keymapper-next-btn')
         };
     }
 
     function bindEvents() {
-        const { editor, settingsBtn, chatWrapper } = appState.dom;
-        if (settingsBtn) {
-            settingsBtn.addEventListener('mousedown', (e) => {
+        const { editor, prevBtn, mainSlot, nextBtn, chatWrapper } = appState.dom;
+
+        // Drag/Settings (Gắn vào Main Slot)
+        if (mainSlot) {
+            mainSlot.addEventListener('mousedown', (e) => {
                 if (e.button === 0) {
                     e.preventDefault();
                     handleDragStart(e);
                 }
             });
         }
+
+        // Navigation Buttons
+        if (prevBtn) {
+            prevBtn.addEventListener('click', () => {
+                resetInactivityTimer();
+                if (BROWSER_UID > MIN_SLOT) requestSwitchTo(BROWSER_UID - 1);
+            });
+        }
+        if (nextBtn) {
+            nextBtn.addEventListener('click', () => {
+                resetInactivityTimer();
+                if (BROWSER_UID < MAX_SLOT) requestSwitchTo(BROWSER_UID + 1);
+            });
+        }
+
         window.addEventListener('resize', handleWindowResize, { passive: true });
+
+        // --- FAVICON MONITORING ---
+        const head = document.querySelector('head');
+        if (head) {
+            headObserver = new MutationObserver(debouncedFindIcon);
+            headObserver.observe(head, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'rel'] });
+        }
+        const titleElement = document.querySelector('head > title');
+        if (titleElement) {
+            titleObserver = new MutationObserver(debouncedFindIcon);
+            titleObserver.observe(titleElement, { childList: true });
+        }
+
+        // History API hooks
         window.addEventListener('popstate', updatePlaceholder);
         const originalPushState = history.pushState;
         history.pushState = function() {
@@ -3153,6 +3665,8 @@ window.ZKeyMapperInitialized = true;
             originalReplaceState.apply(history, arguments);
             updatePlaceholder();
         };
+        // --------------------------
+
         editor.addEventListener('input', () => { resetInactivityTimer(); if (!appState.isEnabled) return; appState.rawText = editor.innerText || ''; clearTimeout(debounceTimer); debounceTimer = setTimeout(highlightSyntax, 50); });
         editor.addEventListener('keydown', (e) => {
             resetInactivityTimer(); e.stopPropagation();
@@ -3167,7 +3681,9 @@ window.ZKeyMapperInitialized = true;
         });
         editor.addEventListener('focus', () => { clearTimeout(inactivityTimer); appState.dom.panelContainer.classList.remove('inactive'); });
         editor.addEventListener('blur', resetInactivityTimer);
-        chatWrapper.addEventListener('click', (e) => { if (!e.target.closest('.icon-btn')) editor.focus(); });
+        chatWrapper.addEventListener('click', (e) => {
+            if (!e.target.closest('.icon-btn')) editor.focus();
+        });
         editor.addEventListener('keyup', (e) => e.stopPropagation());
         editor.addEventListener('keypress', (e) => e.stopPropagation());
         editor.addEventListener('paste', (e) => { resetInactivityTimer(); e.preventDefault(); e.stopPropagation(); const text = e.clipboardData.getData('text/plain'); document.execCommand('insertText', false, text); });
@@ -3176,7 +3692,14 @@ window.ZKeyMapperInitialized = true;
         });
     }
 
-    function enable() { appState.isEnabled = true; if (appState.dom.panelContainer) { appState.dom.panelContainer.style.display = 'flex'; resetInactivityTimer(); } }
+    function enable() {
+        appState.isEnabled = true;
+        if (appState.dom.panelContainer) {
+            appState.dom.panelContainer.style.display = 'flex';
+            resetInactivityTimer();
+            updateMainSlotContent();
+        }
+    }
     function disable() { appState.isEnabled = false; if (appState.dom.panelContainer) { appState.dom.panelContainer.style.display = 'none'; clearTimeout(inactivityTimer); } }
 
     window.zkeymapper_toggle = (isEnabled) => isEnabled ? enable() : disable();
@@ -3184,10 +3707,15 @@ window.ZKeyMapperInitialized = true;
         if (appState.dom.shadowHost) appState.dom.shadowHost.remove();
         window.removeEventListener('resize', handleWindowResize);
         window.removeEventListener('popstate', updatePlaceholder);
+        // Gỡ bỏ Observers và History hooks
+        if (headObserver) headObserver.disconnect();
+        if (titleObserver) titleObserver.disconnect();
+
         ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart'].forEach(eventName => {
             document.removeEventListener(eventName, resetInactivityTimer, { capture: true });
         });
         window.ZKeyMapperInitialized = undefined;
+        delete window.ZKeyMapperTeardown;
     };
 
     async function init() {
@@ -3202,6 +3730,8 @@ window.ZKeyMapperInitialized = true;
         if (appState.dom.panelContainer) {
             enable();
         }
+        // Load favicon lần đầu
+        findAndSetFavicon();
     }
 
     function main() {
@@ -3223,6 +3753,200 @@ window.ZKeyMapperInitialized = true;
 })();
 '''
 ;
+const zErrorLogger =
+'''
+if (typeof window.ZErrorLoggerInitialized === 'undefined') {
+    window.ZErrorLoggerInitialized = true;
+    (function() {
+        const AUTO_CLOSE_DELAY = 3000;
+        const MAX_NOTIFICATIONS = 5;
+        const Z_INDEX = 2147483645;
+        const IGNORED_SOURCES_KEYWORDS = ['rs=', 'xjs=', 'recaptcha', 'google-analytics', 'googletagmanager', 'google.com/gen_204'];
+        const IGNORED_MESSAGES_KEYWORDS = ['sendMessage', 'extension', 'ResizeObserver loop limit exceeded', 'signal is aborted without reason', 'Cannot read properties of null'];
+
+        // ==============================================================================
+        // KỸ THUẬT ASSEMBLY HOOK: Lưu bản gốc và không bao giờ gọi lại nó qua Proxy/Apply
+        // ==============================================================================
+        const _zOriginalConsole = {
+            error: console.error
+        };
+        // Ghi đè console.log và các hàm khác nếu cần theo dõi chúng
+        // const _zOriginalConsoleLog = console.log;
+
+        // FIX LỖI CÚ PHÁP SVG: Bổ sung giá trị height (24) vào viewBox.
+        const ICONS = {
+            error: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>`,
+            copy: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`
+        };
+
+        let container = null;
+        let zErrorPolicy = null;
+        let isIntercepting = false;
+
+        function sanitize(str) {
+            if (typeof str !== 'string') str = String(str);
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+        }
+
+        function setSafeHTML(element, html) {
+            if (!zErrorPolicy) {
+                try { zErrorPolicy = window.trustedTypes.createPolicy('z-error-logger-policy-' + Date.now(), { createHTML: string => string }); } catch (e) {}
+            }
+            if (zErrorPolicy) { element.innerHTML = zErrorPolicy.createHTML(html); }
+            else { element.innerHTML = html; }
+        }
+
+        function createUI() {
+            if (document.getElementById('z-error-logger-container')) return;
+            if (!document.body) { setTimeout(createUI, 100); return; }
+            const style = document.createElement('style');
+            style.textContent = `
+                #z-error-logger-container { position: fixed; bottom: 10px; left: 10px; z-index: ${Z_INDEX}; display: flex; flex-direction: column-reverse; gap: 8px; pointer-events: none; width: 340px; max-width: 90vw; }
+                .z-error-notification { background: rgba(40, 20, 20, 0.85); backdrop-filter: blur(8px); border: 1px solid rgba(255, 80, 80, 0.2); border-left: 3px solid #ef4444; box-shadow: 0 4px 15px rgba(0,0,0,0.3); border-radius: 8px; color: #f0f0f0; display: flex; align-items: flex-start; padding: 10px 14px; gap: 12px; opacity: 0; transform: translateY(20px) scale(0.95); transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); pointer-events: auto; position: relative; overflow: hidden; }
+                .z-error-notification:hover { opacity: 1; background: rgba(50, 30, 30, 0.9); border-color: rgba(255, 100, 100, 0.6); border-left-color: #ff5555; transform: scale(1); }
+                .z-error-notification.visible { transform: translateY(0) scale(1); opacity: 1; } .z-error-notification.closing { transform: translateX(-110%); opacity: 0; }
+                .z-error-icon { width: 20px; height: 20px; flex-shrink: 0; color: #ef4444; margin-top: 2px; } .z-error-content { display: flex; flex-direction: column; gap: 4px; flex-grow: 1; overflow: hidden; cursor: pointer; }
+                .z-error-header { display: flex; gap: 8px; align-items: center; } .z-error-type-badge { background: #ef4444; color: #fff; font-size: 10px; padding: 1px 5px; border-radius: 4px; font-weight: bold; flex-shrink: 0; }
+                .z-error-message { font-weight: 500; font-size: 14px; font-family: monospace; white-space: pre-wrap; word-break: break-all; color: #ffc2c2; }
+                .z-error-source { font-size: 12px; color: #aaa; font-family: monospace; white-space: pre-wrap; word-break: break-all; }
+                .z-error-stack { font-size: 11px; color: #888; font-family: monospace; white-space: pre; background: rgba(0,0,0,0.3); padding: 5px; border-radius: 4px; margin-top: 6px; max-height: 100px; overflow: auto; border: 1px solid #333; }
+                .z-error-controls { display: flex; align-items: center; flex-shrink: 0; margin-left: auto; } .z-error-copy-btn { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 50%; color: #888; cursor: pointer; transition: all 0.2s; }
+                .z-error-copy-btn:hover { background-color: rgba(255, 255, 255, 0.1); color: #fff; }
+            `;
+            document.head.appendChild(style);
+            container = document.createElement('div');
+            container.id = 'z-error-logger-container';
+            document.body.appendChild(container);
+        }
+
+        function isIgnoredError(details) {
+            const msg = (details.message || '').toLowerCase();
+            const src = (details.source || '').toLowerCase();
+            const stack = (details.stack || '').toLowerCase();
+            if (IGNORED_MESSAGES_KEYWORDS.some(keyword => msg.includes(keyword))) return true;
+            if (IGNORED_SOURCES_KEYWORDS.some(keyword => src.includes(keyword))) return true;
+            if (IGNORED_SOURCES_KEYWORDS.some(keyword => stack.includes(keyword))) return true;
+            return false;
+        }
+
+        function displayError(details) {
+            if (isIgnoredError(details)) return;
+            if (!container) createUI();
+            if (!container) return;
+
+            while (container.childNodes.length >= MAX_NOTIFICATIONS) { container.lastChild?.remove(); }
+
+            const notification = document.createElement('div');
+            notification.className = 'z-error-notification';
+            const fullErrorText = `[${details.type}] ${details.message}\nSource: ${details.source}\n\nStack Trace:\n${details.stack || 'Not available'}`;
+            const sanitizedMessage = sanitize(details.message);
+            const sanitizedSource = sanitize(details.source);
+            const sanitizedStack = sanitize(details.stack || '');
+            const stackHtml = sanitizedStack ? `<div class="z-error-stack">${sanitizedStack}</div>` : '';
+
+            // Sử dụng setSafeHTML
+            setSafeHTML(notification, `<div class="z-error-icon">${ICONS.error}</div><div class="z-error-content"><div class="z-error-header"><span class="z-error-type-badge">${sanitize(details.type)}</span><div class="z-error-source" title="${sanitizedSource}">${sanitizedSource}</div></div><div class="z-error-message" title="${sanitizedMessage}">${sanitizedMessage}</div>${stackHtml}</div><div class="z-error-controls"><div class="z-error-copy-btn" title="Copy Details">${ICONS.copy}</div></div>`);
+
+            const copyButtonElement = notification.querySelector('.z-error-copy-btn');
+            if (copyButtonElement) {
+                copyButtonElement.onclick = (e) => {
+                    e.stopPropagation();
+                    navigator.clipboard.writeText(fullErrorText)
+                        .then(() => { copyButtonElement.style.color = '#28a745'; setTimeout(() => { copyButtonElement.style.color = '#888'; }, 1000); })
+                        .catch(err => _zOriginalConsole.error("ZErrorLogger: Failed to copy text: ", err));
+                };
+            }
+
+            let autoCloseTimer = null;
+            const closeNotification = () => { notification.classList.add('closing'); setTimeout(() => notification.remove(), 400); };
+            const startAutoCloseTimer = () => { clearTimeout(autoCloseTimer); autoCloseTimer = setTimeout(closeNotification, AUTO_CLOSE_DELAY); };
+            notification.addEventListener('mouseenter', () => clearTimeout(autoCloseTimer));
+            notification.addEventListener('mouseleave', startAutoCloseTimer);
+            const contentElement = notification.querySelector('.z-error-content');
+            if (contentElement) {
+                contentElement.onclick = (e) => {
+                    e.stopPropagation();
+                    _zOriginalConsole.error("ZErrorLogger Details:", details.originalError || fullErrorText);
+                };
+            }
+            notification.onclick = closeNotification;
+            container.prepend(notification);
+            requestAnimationFrame(() => notification.classList.add('visible'));
+            startAutoCloseTimer();
+        }
+
+        function setupHooks() {
+            window.onerror = (message, source, lineno, colno, error) => {
+                const sourceInfo = `${source.split('/').pop()}:${lineno}:${colno}`;
+                const stack = error && error.stack ? error.stack : (new Error().stack);
+                displayError({ type: error ? error.name : 'Error', message, source: sourceInfo, stack, originalError: error });
+                return false;
+            };
+
+            window.addEventListener('unhandledrejection', (event) => {
+                event.preventDefault(); // Ngăn lỗi in ra console lần nữa
+                const reason = event.reason || {};
+                const message = reason.message || String(reason);
+                const stack = reason.stack || 'Stack not available.';
+                displayError({ type: reason.name || 'PromiseRejection', message, source: 'Unhandled Promise', stack, originalError: reason });
+            });
+
+            // ==============================================================================
+            // GIẢI PHÁP ASSEMBLY HOOK
+            // ==============================================================================
+            if (!console._zHooked) {
+                console.error = function(...args) {
+                    // 1. Thực thi ngay lập tức hành động gốc.
+                    _zOriginalConsole.error.apply(console, args);
+
+                    // 2. Sau khi hành động gốc hoàn tất, thực hiện việc ghi log của chúng ta.
+                    if (isIntercepting) return;
+                    isIntercepting = true;
+                    try {
+                        const message = args.map(arg => {
+                            try { return (typeof arg === 'object' && arg !== null ? JSON.stringify(arg) : String(arg)); }
+                            catch (e) { return '[Unserializable Object]'; }
+                        }).join(' ');
+
+                        // Lấy stack trace một cách an toàn
+                        const stack = new Error().stack;
+                        displayError({ type: 'Console Error', message: message, source: 'console.error', stack: stack, originalError: args[0] });
+                    } catch (e) {
+                        // Nếu có lỗi trong quá trình xử lý của chúng ta, hãy dùng bản gốc để báo cáo.
+                        _zOriginalConsole.error("Error within ZErrorLogger's hook:", e);
+                    } finally {
+                        isIntercepting = false;
+                    }
+                };
+                console._zHooked = true;
+            }
+        }
+
+        function initialize() {
+            const checkBodyAndRun = () => {
+                if (document.body) {
+                    setupHooks();
+                    // Sử dụng hàm gốc để log, tránh vòng lặp
+                    if (_zOriginalConsole.error) {
+                       _zOriginalConsole.error.call(console, "ZErrorLogger Initialized.");
+                    }
+                } else {
+                    setTimeout(checkBodyAndRun, 100);
+                }
+            };
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', checkBodyAndRun);
+            } else {
+                checkBodyAndRun();
+            }
+        }
+
+        initialize();
+    })();
+}
+''';
+
 implementation
 
 end.

@@ -3,7 +3,7 @@
 interface
 
 uses
-  Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants, System.Classes, Vcl.Graphics,
+  Winapi.Windows, Winapi.Messages, Vcl.Dialogs, System.SysUtils, System.Variants, System.Classes, Vcl.Graphics,
   Vcl.Controls, Vcl.Forms, Winapi.WebView2, Winapi.ActiveX,
   Vcl.ExtCtrls, Edge, threading, Winapi.EdgeUtils,
   Vcl.ComCtrls,System.JSON,shellapi, Vcl.StdCtrls, System.NetEncoding,
@@ -30,7 +30,7 @@ type
     Panel2: TPanel;
     Splitter1: TSplitter;
     Panel3: TPanel;
-    EdgeBrowser1: TEdgeBrowser;
+    EdgeBrowser00: TEdgeBrowser;
     Panel4: TPanel;
     procedure FormCreate(Sender: TObject);
     procedure FormActivate(Sender: TObject);
@@ -50,12 +50,13 @@ type
     procedure EdgeBrowser0DocumentTitleChanged(Sender: TCustomEdgeBrowser;
       const ADocumentTitle: string);
   private
+    procedure ControlCreate;
   public
   end;
 
 var
   OpenWebViewAI: TOpenWebViewAI;
-  loadz:byte;
+  loadz,zlocaload:byte;
   DevList,WhiteList,BlackList:Tstringlist;
   DZ,Ddev,DWebUI,Ddownload,Ddownloado,Ddownloadv,Ddownloadp,Dsettings: string;
   folderbrowser,favibrowser,downloadbrowser,historybrowser,localbrowser,activebrowser,aibrowser:TCustomEdgeBrowser;
@@ -65,6 +66,10 @@ var
   LSizeInBytes,LSizeInBytes2: Int64;
   API_PORT :integer;
   chis:string;
+
+  brcount:integer=12;
+  edgebrowser: array [1 .. 12] of TEdgeBrowser;
+
 implementation
 
 uses
@@ -161,6 +166,39 @@ begin
   FolderName := ExtractFileName(FolderName);
   Result := FolderName;
 end;
+//==============================================================================
+
+procedure TOpenWebViewAI.ControlCreate;
+var
+  i: Integer;
+begin
+  for i := 1 to brcount do
+  begin
+    edgebrowser[i] := TEdgeBrowser.Create(Self);
+
+    edgebrowser[i].Parent := Self.Panel2;
+    edgebrowser[i].Align := alClient;
+    edgebrowser[i].Visible := false;
+
+    edgebrowser[i].Tag := i;
+
+    edgebrowser[i].OnCreateWebViewCompleted := EdgeBrowser0CreateWebViewCompleted;
+    edgebrowser[i].OnDevToolsProtocolEventReceived := EdgeBrowser0DevToolsProtocolEventReceived;
+    edgebrowser[i].OnDocumentTitleChanged := EdgeBrowser0DocumentTitleChanged;
+
+    edgebrowser[i].OnHistoryChanged := EdgeBrowser0HistoryChanged;
+    edgebrowser[i].OnNavigationCompleted := EdgeBrowser0NavigationCompleted;
+    edgebrowser[i].OnNavigationStarting := EdgeBrowser0NavigationStarting;
+    edgebrowser[i].OnNewWindowRequested := EdgeBrowser0NewWindowRequested;
+
+    edgebrowser[i].OnWebMessageReceived := EdgeBrowser0WebMessageReceived;
+    edgebrowser[i].OnWebResourceRequested := EdgeBrowser0WebResourceRequested;
+
+    //edgebrowser[i].UserDataFolder:= EdgeBrowser0.UserDataFolder;
+    edgebrowser[i].UserDataFolder:='AICenter\WebUI\WebView'+i.ToString;
+  end;
+end;
+
 
 procedure ListCreate;
 begin
@@ -300,7 +338,6 @@ begin
       FullUri := 'https://' + AUri
     else
       FullUri := AUri;
-
     if Pos('.', AUri) > 0 then
     begin
        tthread.Synchronize(nil,
@@ -368,7 +405,7 @@ begin
 
     if SUCCEEDED(ICoreWebView2(Sender.DefaultInterface).get_Settings(Settings)) then
     begin
-      //Settings.Set_IsStatusBarEnabled(0);
+      Settings.Set_IsStatusBarEnabled(0);
       Settings.Set_AreDefaultContextMenusEnabled(1);
       Settings.Set_IsWebMessageEnabled(1);
     end;
@@ -399,7 +436,7 @@ var
   RequestId, RequestUrl, FrameId, Method: string;
   ResponseSize, ContentLength: Int64;
 begin
-  if Sender = activebrowser then
+  if Sender.tag >= 0 then
   begin
   TThread.Synchronize(nil,
     procedure
@@ -514,14 +551,14 @@ begin
     if (trim(sender.hint)<>'')
     and (not sender.hint.StartsWith('https://private-local-server')) then
     begin
-      if Sender = activebrowser then
+      if sender.tag >= 0  then
       begin
-        TFile.WriteAllText(Dsettings+'\LastUri.json', sender.hint);
+        TFile.WriteAllText(DwebUI+'\LastUri'+sender.tag.tostring+'.json', sender.hint);
       end;
 
        if Sender = localbrowser then
       begin
-        TFile.WriteAllText(Dsettings+'\LastLocalUri.json', sender.hint);
+        TFile.WriteAllText(DwebUI+'\LastLocalUri.json', sender.hint);
       end;
     end;
   end;
@@ -548,59 +585,67 @@ begin;
   begin
     if loadz<>1 then
     begin
-
-      if Sender = activebrowser then
+      if sender.tag >= 0 then
       begin
-        if not fileexists (Dsettings+'\LastUri.json') then
+        if not fileexists (DwebUI+'\LastUri'+sender.tag.tostring+'.json') then
         begin
         Sender.ExecuteScript(zload);
         sender.ExecuteScript(zKeyMapper);
         end
         else
         begin
-          var x:=TFile.ReadAllText(Dsettings+'\LastUri.json');
+          var x:=TFile.ReadAllText(DwebUI+'\LastUri'+sender.tag.tostring+'.json');
           if trim(x)<>'' then
           Navigate(activebrowser,x);
         end;
       end;
+     loadz:=1;
+    end;
 
+    if zlocaload<>1 then
+    begin
        if Sender = localbrowser then
       begin
-        if not fileexists (Dsettings+'\LastLocalUri.json') then
+        if not fileexists (DwebUI+'\LastLocalUri.json') then
         begin
         Sender.ExecuteScript(zload);
         end
         else
         begin
-          var x:=TFile.ReadAllText(Dsettings+'\LastLocalUri.json');
+          var x:=TFile.ReadAllText(DwebUI+'\LastLocalUri.json');
           if trim(x)<>'' then
           Navigate(localbrowser,x);
         end;
       end;
-      loadz:=1;
+      zlocaload:=1;
     end;
 
   end;
 //==============================================================================
   begin
     begin
-     sender.ExecuteScript(zDB_script);
-     sender.ExecuteScript(zKeyMapper);
+     //sender.ExecuteScript(zDB_script);
+     zDB_script(sender,sender.tag);
 
+     sender.ExecuteScript(zKeyMapper);
      sender.ExecuteScript(zkernel);
     end;
 
-    if Sender = activebrowser then
+    if sender.tag >= 0 then
     begin
       Sender.ExecuteScript(zContextMenu);
       Sender.ExecuteScript(zContextMenu2);
-      sender.ExecuteScript(zZone);
+      //sender.ExecuteScript(zZone);
     end;
 
     begin
       //Sender.ExecuteScript(zMediaPopup);
       sender.ExecuteScript(zMiniAlbum);
+
+      sender.ExecuteScript(zErrorLogger);
     end;
+
+
   end;
 end;
 
@@ -730,7 +775,6 @@ var
   LTypeVal, LDataVal, LMessageVal: TJSONValue;
   LTypeStr, LMessageUrl, LBase64Data, LPromptText: string;
   LMediaDataObj, LDataObj: TJSONObject;
-  activebrowser: TCustomEdgeBrowser;
   LPayloadToSend: TJSONObject;
 begin
   jsonValueOuter := nil;
@@ -747,12 +791,15 @@ begin
 
     innerJsonString := (jsonValueOuter as TJSONString).Value;
     LSizeInBytes := Length(innerJsonString) * SizeOf(WideChar);
+
     var x: string := innerJsonString;
     if Length(x) > 1000 then
     begin
       SetLength(x, 1000);
       x := x + '...';
     end;
+    caption:=x;
+
 
     jsonValueInner := TJSONObject.ParseJSONValue(innerJsonString);
     if not (Assigned(jsonValueInner) and (jsonValueInner is TJSONObject)) then
@@ -775,7 +822,6 @@ begin
             LMessageUrl := (LMessageVal as TJSONString).Value;
             if not LMessageUrl.IsEmpty then
             begin
-              activebrowser := Sender as TCustomEdgeBrowser;
               Navigate(activebrowser, LMessageUrl);
             end;
           end;
@@ -851,6 +897,55 @@ begin
           Exit;
         end;
 //==============================================================================
+        if (LTypeStr = 'ZFaviconBarSwitch') then
+        begin
+          var LSlotId:integer;
+
+          if LDataObj.TryGetValue('switchToId', LSlotId) then
+          begin
+
+           if (LSlotId>0) and (sender.tag <>LSlotId) then
+           begin
+             if assigned(edgebrowser[LSlotId]) then
+             begin
+             edgebrowser[LSlotId].Visible:=true;
+             activebrowser:=edgebrowser[LSlotId];
+             activebrowser.tag:=edgebrowser[LSlotId].tag;
+
+              begin
+                if not fileexists (DwebUI+'\LastUri'+activebrowser.tag.tostring+'.json') then
+                begin
+                 var BlankPagePath := DWebUI + '\private-local-server.html';
+                 if not FileExists(BlankPagePath) then
+                 TFile.WriteAllText(BlankPagePath, zprivatelocalserver);
+                 Navigate(activebrowser, BlankPagePath);
+                end
+                else
+                begin
+                  var xx:=TFile.ReadAllText(DwebUI+'\LastUri'+activebrowser.tag.tostring+'.json');
+
+                  if trim(xx)<>'' then
+                  Navigate(activebrowser,xx);
+                end;
+              end;
+             end;
+           end;
+
+           if (LSlotId=0) then
+           begin
+             edgebrowser0.Visible:=true;
+             activebrowser:=edgebrowser0;;
+           end;
+
+           for var i := 1 to brcount do
+            begin
+            if LSlotId<>i then
+            edgebrowser[i].Visible:=false;
+            end;
+          end;
+          Exit;
+        end;
+//==============================================================================
       end;
     end;
   finally
@@ -908,7 +1003,7 @@ begin
           end;
        end;
 
-     if sender=activebrowser then
+     if sender.tag >= 0 then
      begin
         if (SUCCEEDED(Args.ArgsInterface.GetDeferral(Deferral))) and Assigned(request)
         then
@@ -1066,27 +1161,31 @@ begin
     end;
   end;
 
+try
  EnPri(True);
  ListCreate;
  dircreate;
+ ControlCreate;
+finally
 
-if Panel3.Width <> 0 then
-Panel3.Width := screen.Width div 2;
+ if Panel3.Width <> 0 then
+ Panel3.Width := screen.Width div 2;
 
-  //activebrowser:=EdgeBrowser0;
-  //activebrowser.navigate('about:blank');
+ //activebrowser:=EdgeBrowser0;
+ //activebrowser.navigate('about:blank');
 
-  activebrowser := EdgeBrowser0;
-  var BlankPagePath := DWebUI + '\private-local-server.html';
-  if not FileExists(BlankPagePath) then
-    TFile.WriteAllText(BlankPagePath, zprivatelocalserver);
-  Navigate(activebrowser, BlankPagePath);
+ activebrowser := EdgeBrowser0;
 
+ var BlankPagePath := DWebUI + '\private-local-server.html';
+ if not FileExists(BlankPagePath) then
+ TFile.WriteAllText(BlankPagePath, zprivatelocalserver);
+ Navigate(activebrowser, BlankPagePath);
 
-  localbrowser:=EdgeBrowser1;
-  localbrowser.Navigate('http://127.0.0.1:8000');
-  //localbrowser.Navigate('http://127.0.0.1:42003');
+ localbrowser:=EdgeBrowser00;
+ localbrowser.Navigate('http://127.0.0.1:8000');
 
+ //localbrowser.Navigate('http://127.0.0.1:42003');
+ end;
 end;
 
 procedure TOpenWebViewAI.FormCreate(Sender: TObject);

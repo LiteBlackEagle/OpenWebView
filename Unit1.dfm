@@ -1,7 +1,7 @@
 object OpenWebViewAI: TOpenWebViewAI
   Left = 286
   Top = 145
-  ClientHeight = 735
+  ClientHeight = 742
   ClientWidth = 1359
   Color = clBackground
   Font.Charset = DEFAULT_CHARSET
@@ -500,7 +500,7 @@ object OpenWebViewAI: TOpenWebViewAI
     Left = 635
     Top = 0
     Width = 4
-    Height = 735
+    Height = 742
     Align = alRight
     MinSize = 1
     ExplicitLeft = 923
@@ -511,26 +511,29 @@ object OpenWebViewAI: TOpenWebViewAI
     Left = 0
     Top = 0
     Width = 635
-    Height = 735
+    Height = 742
     Align = alClient
     Color = clBackground
     ParentBackground = False
     TabOrder = 0
+    ExplicitHeight = 735
     object Panel2: TPanel
       AlignWithMargins = True
       Left = 4
       Top = 4
       Width = 627
-      Height = 727
+      Height = 734
       Align = alClient
+      Caption = '...'
       Color = clBackground
       ParentBackground = False
       TabOrder = 0
+      ExplicitHeight = 727
       object EdgeBrowser0: TEdgeBrowser
         Left = 1
         Top = 1
         Width = 625
-        Height = 725
+        Height = 732
         Align = alClient
         TabOrder = 0
         AllowSingleSignOnUsingOSPrimaryAccount = False
@@ -545,6 +548,7 @@ object OpenWebViewAI: TOpenWebViewAI
         OnNewWindowRequested = EdgeBrowser0NewWindowRequested
         OnWebMessageReceived = EdgeBrowser0WebMessageReceived
         OnWebResourceRequested = EdgeBrowser0WebResourceRequested
+        ExplicitHeight = 725
       end
     end
   end
@@ -552,31 +556,34 @@ object OpenWebViewAI: TOpenWebViewAI
     Left = 639
     Top = 0
     Width = 720
-    Height = 735
+    Height = 742
     Align = alRight
     Color = clBackground
     ParentBackground = False
     TabOrder = 1
+    ExplicitHeight = 735
     object Panel4: TPanel
       AlignWithMargins = True
       Left = 4
       Top = 4
       Width = 712
-      Height = 727
+      Height = 734
       Align = alClient
       Color = clBackground
       ParentBackground = False
       TabOrder = 0
-      object EdgeBrowser1: TEdgeBrowser
+      ExplicitHeight = 727
+      object EdgeBrowser00: TEdgeBrowser
+        Tag = -1
         Left = 1
         Top = 1
         Width = 710
-        Height = 725
+        Height = 732
         Align = alClient
         TabOrder = 0
         AllowSingleSignOnUsingOSPrimaryAccount = False
         TargetCompatibleBrowserVersion = '137.0.3296.44'
-        UserDataFolder = 'AICenter\WebUI\WebView1'
+        UserDataFolder = 'AICenter\WebUI\WebView0'
         OnCreateWebViewCompleted = EdgeBrowser0CreateWebViewCompleted
         OnDevToolsProtocolEventReceived = EdgeBrowser0DevToolsProtocolEventReceived
         OnHistoryChanged = EdgeBrowser0HistoryChanged
@@ -585,6 +592,7 @@ object OpenWebViewAI: TOpenWebViewAI
         OnNewWindowRequested = EdgeBrowser0NewWindowRequested
         OnWebMessageReceived = EdgeBrowser0WebMessageReceived
         OnWebResourceRequested = EdgeBrowser0WebResourceRequested
+        ExplicitLeft = 2
       end
     end
   end

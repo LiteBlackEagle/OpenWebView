@@ -1462,7 +1462,7 @@ bgimg
                     if (isHibernating) exitHibernation();
                     timeoutId = setTimeout(() => {
                         starSpeed = 0.5;
-                        window.chrome.webview.postMessage('ZLogin');
+                        //window.chrome.webview.postMessage('ZLogin');
                     }, 1500);
                 });
 
@@ -1471,7 +1471,7 @@ bgimg
                         if (event.animationName === 'typing') {
                             welcomeMessage.classList.add('finished');
                             setTimeout(() => {
-                                window.chrome.webview.postMessage('ZLogin');
+                                //window.chrome.webview.postMessage('ZLogin');
                             }, 500);
                         }
                     });
@@ -1858,7 +1858,7 @@ bgimg
                     if (isHibernating) exitHibernation();
                     timeoutId = setTimeout(() => {
                         starSpeed = 0.5;
-                        window.chrome.webview.postMessage('ZLogin');
+                        //window.chrome.webview.postMessage('ZLogin');
                     }, 1500);
                 });
 
@@ -1867,7 +1867,7 @@ bgimg
                         if (event.animationName === 'typing') {
                             welcomeMessage.classList.add('finished');
                             setTimeout(() => {
-                                window.chrome.webview.postMessage('ZLogin');
+                                //window.chrome.webview.postMessage('ZLogin');
                             }, 500);
                         }
                     });

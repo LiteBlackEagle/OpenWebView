@@ -8,9 +8,132 @@ interface
 uses
   System.SysUtils, System.Classes, Winapi.WebView2, edge, System.NetEncoding;
 
+
+procedure zDB_script (br: TCustomEdgeBrowser; uid: integer);
 procedure zNotifier(br: TCustomEdgeBrowser; noti: string; ColorID: Integer = 0);
 
+
 implementation
+
+// FILE: ZStr.pas
+procedure zDB_script(br: TCustomEdgeBrowser; uid: integer);
+var
+  script, sUID: string;
+begin
+  sUID := IntToStr(uid);
+  script :=
+'''
+  // Sử dụng một cờ duy nhất để kiểm tra, tránh xung đột
+  if (typeof window.ZDBInitializedForUID === 'undefined') {
+      window.ZDBInitializedForUID = true; // Đánh dấu đã khởi tạo
+      window.ZDB_READY = false;
+      // <<< ĐIỂM QUAN TRỌNG: Gắn UID vào window để các script khác có thể đọc >>>
+      window.Z_BROWSER_UID =
+'''
++
+sUID
++
+'''
+;
+
+      (function(uid) {
+          // Tên DB độc nhất dựa trên UID
+          const DB_NAME = `ZWebview_Persistence_DB_${uid}`;
+          let DB_VERSION = 1;
+
+          const EXPECTED_STORES = [
+              'zKernelScripts',
+              'zKernelState',
+              'zTaskbarState',
+              'zKeyMapperState',
+              'zFaviconBarState',
+              'zMediaPopupState',
+              'zMiniAlbumItems',
+              'zContextMenu2State'
+          ];
+
+          let _dbPromise = null;
+
+          function getDBConnection(newVersion) {
+              return new Promise((resolve, reject) => {
+                  const request = indexedDB.open(DB_NAME, newVersion);
+                  request.onerror = event => {
+                      console.error(`[zDB-${uid}] Error opening DB:`, event.target.error);
+                      reject(event.target.error);
+                  };
+                  request.onsuccess = event => resolve(event.target.result);
+                  request.onupgradeneeded = event => {
+                      const db = event.target.result;
+                      console.log(`[zDB-${uid}] onupgradeneeded triggered for DB: ${DB_NAME}`);
+                      EXPECTED_STORES.forEach(storeName => {
+                          if (!db.objectStoreNames.contains(storeName)) {
+                              db.createObjectStore(storeName, { keyPath: 'id' });
+                          }
+                      });
+                  };
+              });
+          }
+
+          async function initializeDB() {
+              console.log(`[zDB-${uid}] Initializing database: ${DB_NAME}`);
+              try {
+                  const dbForCheck = await new Promise((resolve, reject) => {
+                      const request = indexedDB.open(DB_NAME);
+                      request.onerror = e => reject(e.target.error);
+                      request.onsuccess = e => resolve(e.target.result);
+                  });
+
+                  let needsUpgrade = false;
+                  DB_VERSION = dbForCheck.version;
+                  const existingStores = Array.from(dbForCheck.objectStoreNames);
+                  dbForCheck.close();
+                  if (EXPECTED_STORES.some(s => !existingStores.includes(s)) ||
+                      existingStores.some(s => !EXPECTED_STORES.includes(s))) {
+                      needsUpgrade = true;
+                      DB_VERSION++;
+                  }
+
+                  if (needsUpgrade) {
+                      console.log(`[zDB-${uid}] Schema change. Opening with new version: ${DB_VERSION}`);
+                      const db = await getDBConnection(DB_VERSION);
+                      db.close();
+                  }
+
+                  _dbPromise = getDBConnection(DB_VERSION);
+
+                  window.ZSharedDB = {
+                      performTransaction: async (storeName, mode, action) => {
+                          if (!EXPECTED_STORES.includes(storeName)) {
+                               return Promise.reject(`[ZSharedDB-${uid}] Error: Object store '${storeName}' is not defined.`);
+                          }
+                          const db = await _dbPromise;
+                          return new Promise((resolve, reject) => {
+                              const transaction = db.transaction(storeName, mode);
+                              transaction.onerror = event => reject(event.target.error);
+                              const store = transaction.objectStore(storeName);
+                              const request = action(store);
+                              request.onsuccess = () => resolve(request.result);
+                              request.onerror = event => reject(event.target.error);
+                          });
+                      }
+                  };
+
+                  console.log(`[zDB-${uid}] Database is ready: ${DB_NAME}`);
+                  window.ZDB_READY = true;
+                  document.dispatchEvent(new CustomEvent('ZDB_READY'));
+
+              } catch (error) {
+                  console.error(`[zDB-${uid}] CRITICAL ERROR during DB init for ${DB_NAME}:`, error);
+                  window.ZDB_READY = false;
+                  window.ZSharedDB = { performTransaction: async () => Promise.reject('Database not available.') };
+              }
+          }
+          initializeDB();
+      })(window.Z_BROWSER_UID);
+  }
+''';
+  br.ExecuteScript(script);
+end;
 
 procedure zNotifier(br: TCustomEdgeBrowser; noti: string; ColorID: Integer = 0);
 var
